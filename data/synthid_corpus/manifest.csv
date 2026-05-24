@@ -1,0 +1,4 @@
+sha256,filename,label,source,model,width,height,format,c2pa_issuer,synthid_metadata,verified_via,added,notes
+4ef377bde1a1d4eff141972841938643b173f5052992a018b9a21b31ac31731e,"4ef377bd-ChatGPT Image May 23, 2026, 02_43_02 PM.png",pos,ChatGPT,gpt-image,1254,1254,png,OpenAI,yes,openai-verify,2026-05-23T21:48:12Z,fresh post-rollout 2026-05-23; openai.com/verify: SynthID+C2PA detected
+d09f84c0e4c6d8b336bf4a9a7277314e940dcb5052ae7051e785cbb3bb42d656,d09f84c0-Gemini_Generated_Image_vq7wkwvq7wkwvq7w.png,pos,Gemini app,gemini,2816,1536,png,Google LLC,yes,c2pa-metadata,2026-05-23T21:52:40Z,"user: latest Gemini, SynthID v2"
+47188e88f956291bd38ab6906e5f21eb273d4a697ddc8b4479deac9f48915e1a,47188e88-disco_synthid_removed.png,cleaned,our pipeline (invisible/SDXL),stabilityai/stable-diffusion-xl-base-1.0,1254,1254,png,,,openai-verify,2026-05-23T22:06:54Z,cleaned from 4ef377bd disco; openai.com/verify: SynthID NOT detected (defeated)

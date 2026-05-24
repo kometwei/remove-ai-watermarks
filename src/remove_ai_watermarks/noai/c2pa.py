@@ -29,6 +29,7 @@ from remove_ai_watermarks.noai.constants import (
     C2PA_ISSUERS,
     C2PA_SIGNATURES,
     PNG_SIGNATURE,
+    SYNTHID_C2PA_ISSUERS,
 )
 
 
@@ -129,10 +130,56 @@ def extract_c2pa_info(image_path: Path) -> dict[str, Any]:
     return c2pa_info
 
 
+def _cbor_text_after(payload: bytes, key: bytes) -> str | None:
+    """Return the CBOR text-string immediately following ``key`` in ``payload``.
+
+    Handles CBOR major-type 3 length prefixes: direct (0x60-0x77), 1-byte
+    (0x78 NN), and 2-byte (0x79 NN NN). This reads the actual encoded value, so
+    it avoids the byte-grabbing artifacts a loose regex produces (e.g. the
+    leading length byte showing up as ``fGPT-4o``).
+    """
+    idx = payload.find(key)
+    if idx < 0:
+        return None
+    p = idx + len(key)
+    if p >= len(payload):
+        return None
+    head = payload[p]
+    if 0x60 <= head <= 0x77:
+        length, start = head - 0x60, p + 1
+    elif head == 0x78 and p + 1 < len(payload):
+        length, start = payload[p + 1], p + 2
+    elif head == 0x79 and p + 2 < len(payload):
+        length, start = (payload[p + 1] << 8) | payload[p + 2], p + 3
+    else:
+        return None
+    raw_str = payload[start : start + length]
+    try:
+        return raw_str.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw_str.decode("latin1", errors="replace")
+
+
+def synthid_verdict(vendors: str) -> str:
+    """Human-readable SynthID-source verdict, shared by all callers."""
+    return f"likely present ({vendors} embeds SynthID with C2PA)"
+
+
+def synthid_vendors_in(buffer: bytes) -> list[str]:
+    """Return SynthID-using C2PA issuer names whose signature appears in ``buffer``.
+
+    Shared by the PNG caBX parser and the format-agnostic binary scan so both
+    apply the same SYNTHID_C2PA_ISSUERS rule against their respective bytes.
+    """
+    return sorted({name for sig, name in C2PA_ISSUERS.items() if sig in buffer and sig in SYNTHID_C2PA_ISSUERS})
+
+
 def _parse_c2pa_chunk(chunk_data: bytes, c2pa_info: dict[str, Any]) -> None:
     """Parse C2PA chunk data and populate info dictionary."""
+    c2pa_info["c2pa_manifest"] = f"C2PA manifest ({len(chunk_data)} bytes)"
+
     # Find issuers
-    issuers = []
+    issuers: list[str] = []
     for sig, name in C2PA_ISSUERS.items():
         if sig in chunk_data:
             issuers.append(name)
@@ -140,44 +187,22 @@ def _parse_c2pa_chunk(chunk_data: bytes, c2pa_info: dict[str, Any]) -> None:
         c2pa_info["issuer"] = ", ".join(set(issuers))
 
     # Find AI tools
-    ai_tools = []
+    ai_tools: list[str] = []
     for sig, name in C2PA_AI_TOOLS.items():
         if sig in chunk_data:
             ai_tools.append(name)
     if ai_tools:
         c2pa_info["ai_tool"] = ", ".join(set(ai_tools))
 
-    # Extract software agent (multiple patterns)
-    patterns = [
-        rb"softwareAgent.*?dname([^\x00]+?)(?:q|l|m|n)",
-        rb"software_agent[^\x00]*?([A-Za-z0-9_\-\.]+)",
-        rb"Software[^\x00]*?([A-Za-z0-9_\-\. ]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, chunk_data, re.DOTALL | re.IGNORECASE)
-        if match:
-            agent = match.group(1).decode("utf-8", errors="ignore").strip()
-            if agent and len(agent) < 100:
-                c2pa_info["software_agent"] = agent
-                break
-
-    # Extract claim generator (multiple patterns)
-    claim_patterns = [
-        rb"claim_generator[^\x00]*?([A-Za-z0-9_\-\.\/\:]+)",
-        rb"claimGenerator[^\x00]*?([A-Za-z0-9_\-\.\/\:]+)",
-        rb"dname([^\x00]{3,50})(?:q|l|m|n|i)",
-    ]
-    for pattern in claim_patterns:
-        match = re.search(pattern, chunk_data, re.DOTALL | re.IGNORECASE)
-        if match:
-            gen_name = match.group(1).decode("utf-8", errors="ignore").strip()
-            # Filter out common false positives
-            if gen_name and len(gen_name) < 100 and not gen_name.startswith(("\\x", "\\\\x")):
-                c2pa_info["claim_generator"] = gen_name
-                break
+    # Claim generator and spec version: read the CBOR text-string values
+    # directly (regex byte-grabbing produced artifacts like ``fGPT-4o``).
+    if generator := _cbor_text_after(chunk_data, b"name"):
+        c2pa_info["claim_generator"] = generator
+    if spec := _cbor_text_after(chunk_data, b"specVersion"):
+        c2pa_info["c2pa_spec"] = spec
 
     # Find actions
-    actions = []
+    actions: list[str] = []
     for sig, name in C2PA_ACTIONS.items():
         if sig in chunk_data:
             actions.append(name)
@@ -192,12 +217,23 @@ def _parse_c2pa_chunk(chunk_data: bytes, c2pa_info: dict[str, Any]) -> None:
             c2pa_info["timestamps"] = [t.decode("utf-8") for t in timestamp_matches[:3]]
 
     # Find digital source type
+    ai_source = False
     if b"trainedAlgorithmicMedia" in chunk_data:
         c2pa_info["source_type"] = "trainedAlgorithmicMedia (AI-generated)"
+        ai_source = True
     elif b"algorithmicMedia" in chunk_data:
         c2pa_info["source_type"] = "algorithmicMedia"
     elif b"compositeWithTrainedAlgorithmicMedia" in chunk_data:
         c2pa_info["source_type"] = "compositeWithTrainedAlgorithmicMedia (AI-enhanced)"
+        ai_source = True
+
+    # SynthID pixel-watermark proxy: a C2PA manifest from a SynthID-using
+    # vendor (Google/OpenAI) on AI-generated content implies an invisible
+    # SynthID watermark in the pixels (see SYNTHID_C2PA_ISSUERS).
+    synthid_vendors = synthid_vendors_in(chunk_data)
+    if synthid_vendors and ai_source:
+        c2pa_info["synthid_vendors"] = synthid_vendors
+        c2pa_info["synthid_watermark"] = synthid_verdict(", ".join(synthid_vendors))
 
 
 def extract_c2pa_chunk(image_path: Path) -> bytes | None:

@@ -21,6 +21,9 @@ Thumbs.db
 # Test results
 data/results/
 
+# SynthID corpus images (manifest.csv + README.md stay tracked)
+data/synthid_corpus/images/
+
 # Reference materials
 _refs/
 
@@ -30,3 +33,4 @@ yolov8n.pt
 
 # Claude Code local settings
 .claude/settings.local.json
+data/synthid_corpus/refs/

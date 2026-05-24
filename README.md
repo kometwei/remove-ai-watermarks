@@ -187,6 +187,10 @@ remove-ai-watermarks visible image.png -o clean.png
 remove-ai-watermarks invisible image.png -o clean.png --humanize 4.0
 
 # Check / strip AI metadata (C2PA, EXIF, "Made with AI" labels)
+# --check also flags SynthID-bearing sources: a C2PA manifest signed by
+# Google or OpenAI implies an invisible SynthID watermark in the pixels
+# (both vendors pair the two). Adobe Firefly / Microsoft sign C2PA without
+# SynthID, so they are reported as C2PA only.
 remove-ai-watermarks metadata image.png --check
 remove-ai-watermarks metadata image.png --remove
 
@@ -253,7 +257,7 @@ pip install certifi
 
 Tracked but not yet implemented:
 
-- **SynthID-Image v2 automated regression test**. The default SDXL profile defeats v2 per manual checks against the [Gemini app](https://support.google.com/gemini/answer/16722517)'s "Verify with SynthID" feature on a Gemini 3 Pro output (May 2026). An automated end-to-end test would need either programmatic access to the [SynthID Detector portal](https://blog.google/innovation-and-ai/products/google-synthid-ai-content-detector/) (waitlist for media professionals and researchers) or an offline surrogate detector. Open.
+- **SynthID-Image v2 automated regression test**. The default SDXL profile defeats v2 per manual checks against the [Gemini app](https://support.google.com/gemini/answer/16722517)'s "Verify with SynthID" feature on a Gemini 3 Pro output (May 2026). An automated end-to-end test would need either programmatic access to the [SynthID Detector portal](https://blog.google/innovation-and-ai/products/google-synthid-ai-content-detector/) (waitlist for media professionals and researchers) or an offline surrogate detector. The spectral phase-coherence surrogate from [reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID) was evaluated and does not separate watermarked from cleaned real-content images (it only fires on controlled solid-color references at exact resolution), so it is not a usable oracle. Open.
 - **AVIF / HEIF / JPEG-XL detection limits**. Removal strips top-level C2PA `uuid` and JUMBF `jumb` boxes. EXIF/XMP boxes inside these containers are not yet scrubbed (PNG and JPEG are fully covered).
 - **Video pipeline (`noai-video`)**: per-frame inpainting and tracking for Sora 2 dynamic logo, Veo 3.1 badge, Kling, Runway. Separate package, not folded into this repo.
 

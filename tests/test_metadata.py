@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
@@ -12,7 +13,11 @@ from remove_ai_watermarks.metadata import (
     get_ai_metadata,
     has_ai_metadata,
     remove_ai_metadata,
+    synthid_source,
 )
+
+# Real, committed C2PA sample images used to ground the SynthID-source tests.
+SAMPLES_DIR = Path(__file__).resolve().parent.parent / "data" / "samples"
 
 # ── Key detection ───────────────────────────────────────────────────
 
@@ -143,6 +148,109 @@ class TestGetAiMetadata:
     def test_clean_image_empty_dict(self, tmp_clean_png):
         meta = get_ai_metadata(tmp_clean_png)
         assert meta == {}
+
+    def test_long_value_is_truncated(self, tmp_path: Path):
+        img = Image.new("RGB", (32, 32))
+        pnginfo = PngInfo()
+        pnginfo.add_text("parameters", "x" * 300)
+        path = tmp_path / "long.png"
+        img.save(path, pnginfo=pnginfo)
+        meta = get_ai_metadata(path)
+        assert meta["parameters"].endswith("…")
+        assert len(meta["parameters"]) <= 205
+
+
+@pytest.mark.skipif(not SAMPLES_DIR.exists(), reason="data/samples not present")
+class TestGetAiMetadataRealSample:
+    """get_ai_metadata surfaces the consolidated C2PA fields on real images."""
+
+    def test_openai_sample_fields(self):
+        meta = get_ai_metadata(SAMPLES_DIR / "chatgpt-1.png")
+        assert "claim_generator" in meta
+        assert "OpenAI" in meta["issuer"]
+        assert "OpenAI" in meta["synthid_watermark"]
+        assert "trainedAlgorithmicMedia" in meta["source_type"]
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        b"trainedAlgorithmicMedia",
+        b"compositeSynthetic",
+        b"algorithmicMedia",
+        b"compositeWithTrainedAlgorithmicMedia",
+    ],
+)
+def test_has_ai_metadata_detects_each_iptc_marker(tmp_path: Path, marker: bytes):
+    """Each IPTC digitalSourceType AI marker in XMP triggers detection."""
+    path = tmp_path / "iptc.jpg"
+    path.write_bytes(b"\xff\xd8\xff\xe1<x:xmpmeta>" + marker + b"</x:xmpmeta>\xff\xd9")
+    assert has_ai_metadata(path)
+
+
+# ── SynthID-source detection (metadata proxy) ────────────────────────
+
+
+@pytest.mark.skipif(not SAMPLES_DIR.exists(), reason="data/samples not present")
+class TestSynthIDSource:
+    """SynthID detection via the C2PA companion manifest.
+
+    Google (Imagen/Gemini) and OpenAI (ChatGPT/DALL-E/gpt-image) pair an
+    invisible SynthID pixel watermark with a C2PA manifest. Adobe Firefly and
+    Microsoft Designer sign C2PA Content Credentials but do NOT use SynthID,
+    so the discriminating signal is the C2PA *issuer*, not the mere presence
+    of a manifest. These tests run against real, committed sample images.
+    """
+
+    def test_openai_chatgpt_is_synthid_source(self):
+        assert synthid_source(SAMPLES_DIR / "chatgpt-1.png") == "OpenAI"
+
+    def test_openai_verdict_in_get_ai_metadata(self):
+        meta = get_ai_metadata(SAMPLES_DIR / "chatgpt-1.png")
+        assert "synthid_watermark" in meta
+        assert "OpenAI" in meta["synthid_watermark"]
+
+    def test_adobe_firefly_is_not_synthid_source(self):
+        # Adobe signs C2PA (trainedAlgorithmicMedia) but embeds no SynthID.
+        assert synthid_source(SAMPLES_DIR / "firefly-1.png") is None
+        assert "synthid_watermark" not in get_ai_metadata(SAMPLES_DIR / "firefly-1.png")
+
+    def test_non_ai_image_is_not_synthid_source(self):
+        assert synthid_source(SAMPLES_DIR / "not-ai-1.jpeg") is None
+
+
+class TestSynthIDSourceNonPng:
+    """SynthID-source detection must work beyond PNG.
+
+    ChatGPT/Gemini images saved as JPEG/WebP/AVIF carry their C2PA manifest in
+    a non-PNG container (JPEG APP11, ISOBMFF uuid box), so the PNG caBX parser
+    misses them. These use synthetic byte blobs (real fixtures aren't shipped).
+    """
+
+    def _c2pa_jpeg(self, tmp_path: Path, name: str, issuer: bytes, marker: bytes = b"trainedAlgorithmicMedia") -> Path:
+        path = tmp_path / name
+        # Minimal JPEG shell with an embedded C2PA-ish blob.
+        blob = b"jumbc2pa" + issuer + b"..." + marker
+        path.write_bytes(b"\xff\xd8\xff\xe1" + blob + b"\xff\xd9")
+        return path
+
+    def test_openai_c2pa_in_jpeg(self, tmp_path: Path):
+        path = self._c2pa_jpeg(tmp_path, "chatgpt.jpg", b"OpenAI")
+        assert synthid_source(path) == "OpenAI"
+
+    def test_google_c2pa_in_jpeg(self, tmp_path: Path):
+        path = self._c2pa_jpeg(tmp_path, "gemini.jpg", b"Google")
+        assert synthid_source(path) == "Google LLC"
+
+    def test_adobe_c2pa_in_jpeg_is_none(self, tmp_path: Path):
+        # Adobe signs C2PA but embeds no SynthID.
+        path = self._c2pa_jpeg(tmp_path, "firefly.jpg", b"Adobe")
+        assert synthid_source(path) is None
+
+    def test_openai_without_ai_marker_is_none(self, tmp_path: Path):
+        # Issuer present but no AI digital-source marker -> not a SynthID source.
+        path = self._c2pa_jpeg(tmp_path, "edited.jpg", b"OpenAI", marker=b"")
+        assert synthid_source(path) is None
 
 
 # ── remove_ai_metadata ──────────────────────────────────────────────
