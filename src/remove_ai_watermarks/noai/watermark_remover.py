@@ -176,8 +176,11 @@ def _reinstall_torch_cuda_and_restart() -> None:
         return
 
     os.environ[_CUDA_FIX_ENV_KEY] = "1"
-    restart_code = f"import sys; sys.argv = {sys.argv!r}; from remove_ai_watermarks.cli import main; sys.exit(main())"
-    os.execl(sys.executable, sys.executable, "-c", restart_code)
+    # Re-exec via ``-m`` rather than building a ``-c`` string from repr(sys.argv).
+    # ``-m`` makes Python set argv[0] to the module path, so forward only the
+    # actual args (sys.argv[1:]); passing the full argv would re-inject the
+    # program name as a spurious first argument to Click.
+    os.execv(sys.executable, [sys.executable, "-m", "remove_ai_watermarks.cli", *sys.argv[1:]])
 
 
 def _ensure_watermark_deps() -> None:
