@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import piexif
 import pytest
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 from remove_ai_watermarks.metadata import (
     _is_ai_key,
+    exif_generator,
     get_ai_metadata,
     has_ai_metadata,
     remove_ai_metadata,
@@ -332,3 +334,44 @@ class TestRemoveAiMetadata:
         result = remove_ai_metadata(tmp_clean_png, output)
         assert isinstance(result, Path)
         assert result == output
+
+
+def _img_with_software(tmp_path: Path, fmt: str, software: str) -> Path:
+    """Write a tiny image carrying an EXIF Software tag."""
+    exif = piexif.dump({"0th": {piexif.ImageIFD.Software: software.encode()}, "Exif": {}, "GPS": {}, "1st": {}})
+    path = tmp_path / f"img.{fmt}"
+    Image.new("RGB", (64, 64), (100, 90, 80)).save(path, exif=exif)
+    return path
+
+
+class TestExifGenerator:
+    """exif_generator extracts AI-tool names from EXIF/XMP across formats."""
+
+    def test_avif_software_ai_tool_detected(self, tmp_path: Path):
+        path = _img_with_software(tmp_path, "avif", "Adobe Firefly")
+        assert exif_generator(path) == "Adobe Firefly"
+
+    def test_jpeg_software_ai_tool_detected(self, tmp_path: Path):
+        path = _img_with_software(tmp_path, "jpg", "ComfyUI v1.2")
+        result = exif_generator(path)
+        assert result is not None
+        assert "ComfyUI" in result
+
+    def test_plain_editor_not_flagged(self, tmp_path: Path):
+        # An ordinary editor tag carries no AI token and must not be flagged.
+        path = _img_with_software(tmp_path, "jpg", "Adobe Photoshop 25.0")
+        assert exif_generator(path) is None
+
+    def test_xmp_creatortool_scan_covers_unopenable(self, tmp_path: Path):
+        # PIL can't open this fake HEIF; the raw XMP CreatorTool scan still works.
+        path = tmp_path / "fake.heic"
+        path.write_bytes(
+            b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"
+            b"<x:xmpmeta><xmp:CreatorTool>Midjourney v7</xmp:CreatorTool></x:xmpmeta>"
+        )
+        result = exif_generator(path)
+        assert result is not None
+        assert "Midjourney" in result
+
+    def test_clean_image_is_none(self, tmp_clean_png: Path):
+        assert exif_generator(tmp_clean_png) is None

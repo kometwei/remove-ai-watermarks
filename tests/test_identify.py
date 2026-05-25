@@ -267,6 +267,23 @@ class TestReportSerializable:
         assert "is_ai_generated" in dumped
 
 
+class TestIdentifyExifGenerator:
+    """An AI generator tag in EXIF/XMP (incl. AVIF) drives attribution."""
+
+    def test_avif_firefly_software_attributed(self, tmp_path: Path):
+        import piexif
+        from PIL import Image
+
+        exif = piexif.dump({"0th": {piexif.ImageIFD.Software: b"Adobe Firefly"}, "Exif": {}, "GPS": {}, "1st": {}})
+        path = tmp_path / "firefly.avif"
+        Image.new("RGB", (64, 64), (90, 80, 70)).save(path, exif=exif)
+        r = identify(path, check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.platform is not None
+        assert "Firefly" in r.platform
+        assert any("generator tag" in w for w in r.watermarks)
+
+
 # ── Open invisible watermark (SD/SDXL/FLUX) integration ─────────────
 
 from remove_ai_watermarks.invisible_watermark import is_available as _wm_available  # noqa: E402

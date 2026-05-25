@@ -26,6 +26,7 @@ from remove_ai_watermarks.metadata import (
     AI_METADATA_KEYS,
     C2PA_UUID,
     IPTC_AI_MARKERS,
+    exif_generator,
     get_ai_metadata,
 )
 from remove_ai_watermarks.noai.c2pa import extract_c2pa_info
@@ -226,6 +227,14 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         if platform is None:
             platform = "Stable Diffusion / local pipeline (Automatic1111, ComfyUI, InvokeAI)"
 
+    # ── EXIF Software / XMP CreatorTool generator (cross-format) ─────
+    # Catches a generator tag (incl. inside AVIF/HEIF/JXL) when there is no C2PA.
+    if generator_tag := exif_generator(image_path):
+        signals.append(Signal("exif_generator", f"EXIF/XMP generator: {generator_tag}", "high"))
+        watermarks.append(f"Embedded generator tag: {generator_tag}")
+        if platform is None:
+            platform = f"{generator_tag} (EXIF/XMP generator tag)"
+
     # ── Open invisible watermark (SD / SDXL / FLUX, dwtDct) ──────────
     # Public decoder, no key -- a definitive embedded signal on pristine files.
     if check_invisible and (scheme := _invisible_watermark(image_path)) is not None:
@@ -237,7 +246,8 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
 
     # ── Verdict so far (metadata + embedded watermark) ──────────────
     invisible_wm = any(s.name == "invisible_watermark" for s in signals)
-    ai_from_metadata = bool((has_c2pa and (c2pa_is_ai or synthid)) or iptc or local_keys or invisible_wm)
+    exif_gen = any(s.name == "exif_generator" for s in signals)
+    ai_from_metadata = bool((has_c2pa and (c2pa_is_ai or synthid)) or iptc or local_keys or invisible_wm or exif_gen)
 
     # ── Visible Gemini sparkle (fallback for stripped-metadata case) ─
     if check_visible and (conf := _visible_sparkle(image_path)) is not None and conf >= _SPARKLE_THRESHOLD:

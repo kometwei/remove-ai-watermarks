@@ -122,6 +122,32 @@ C2PA_AI_TOOLS = {
     b"Firefly": "Firefly",
 }
 
+# Lowercased substrings that mark an AI generator when found in an EXIF
+# ``Software`` / XMP ``CreatorTool`` value. Conservative on purpose: plain
+# editors like "Adobe Photoshop" or "GIMP" must NOT match (no AI token), so only
+# generator names land here. Add new generators here, not inline.
+AI_GENERATOR_TOKENS: frozenset[str] = frozenset(
+    {
+        "firefly",
+        "dall-e",
+        "dalle",
+        "midjourney",
+        "stable diffusion",
+        "stable-diffusion",
+        "stablediffusion",
+        "comfyui",
+        "automatic1111",
+        "invokeai",
+        "imagen",
+        "gpt-image",
+        "nightcafe",
+        "ideogram",
+        "leonardo",
+        "flux",
+        "dreamstudio",
+    }
+)
+
 # C2PA action types
 C2PA_ACTIONS = {
     b"c2pa.created": "created",

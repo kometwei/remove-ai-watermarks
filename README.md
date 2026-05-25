@@ -188,9 +188,10 @@ remove-ai-watermarks batch ./images/ --mode all
 
 ```bash
 # Identify provenance: where an image was made + its watermark inventory.
-# Aggregates C2PA, IPTC "Made with AI", embedded SD/ComfyUI params, the
-# SynthID proxy, the visible Gemini sparkle, and (with the [detect] extra) the
-# open SD/SDXL/FLUX invisible watermark into one verdict. Reports "unknown"
+# Aggregates C2PA, IPTC "Made with AI", embedded SD/ComfyUI params, EXIF/XMP
+# generator tags (incl. inside AVIF/HEIF), the SynthID proxy, the visible Gemini
+# sparkle, and (with the [detect] extra) the open SD/SDXL/FLUX invisible
+# watermark into one verdict. Reports "unknown"
 # (never "clean") when no signal is found, since stripped metadata is not proof
 # of a clean origin. Add --json for machine-readable output.
 remove-ai-watermarks identify image.png

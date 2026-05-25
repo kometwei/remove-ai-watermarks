@@ -183,6 +183,52 @@ def synthid_source(image_path: Path) -> str | None:
     return ", ".join(matched) if matched else None
 
 
+def exif_generator(image_path: Path) -> str | None:
+    """Return an AI-generator name from the EXIF ``Software`` / XMP ``CreatorTool``
+    field, if it matches a known generator (see ``AI_GENERATOR_TOKENS``), else None.
+
+    Cross-format: EXIF is read via PIL + piexif for any container PIL can open
+    (JPEG/WebP/AVIF/PNG); an XMP ``CreatorTool`` raw-byte scan additionally covers
+    HEIF/JPEG-XL that PIL can't open without plugins. Only AI tokens match, so
+    ordinary editors (plain "Adobe Photoshop", "GIMP") are not flagged.
+    """
+    import re
+
+    from remove_ai_watermarks.noai.constants import AI_GENERATOR_TOKENS
+
+    candidates: list[str] = []
+
+    # EXIF Software / Artist / ImageDescription (0th IFD) via PIL exif bytes.
+    try:
+        import piexif
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            exif_bytes = img.info.get("exif")
+        if exif_bytes:
+            tags = piexif.load(exif_bytes).get("0th", {})
+            for tag in (piexif.ImageIFD.Software, piexif.ImageIFD.Artist, piexif.ImageIFD.ImageDescription):
+                value = tags.get(tag)
+                if isinstance(value, bytes):
+                    candidates.append(value.decode("latin1", "replace"))
+    except Exception as exc:  # unopenable format / malformed EXIF
+        logger.debug("EXIF generator read failed for %s: %s", image_path, exc)
+
+    # XMP CreatorTool: text, container-agnostic (covers HEIF/JXL via raw scan).
+    try:
+        with open(image_path, "rb") as f:
+            head = f.read(1024 * 1024)
+        for match in re.finditer(rb"CreatorTool[>\"'=\s]{1,4}([^<\"']{1,80})", head):
+            candidates.append(match.group(1).decode("latin1", "replace"))
+    except Exception as exc:
+        logger.debug("XMP CreatorTool scan failed for %s: %s", image_path, exc)
+
+    for value in candidates:
+        if any(token in value.lower() for token in AI_GENERATOR_TOKENS):
+            return value.strip()
+    return None
+
+
 def get_ai_metadata(image_path: Path) -> dict[str, str]:
     """Extract AI-related metadata from an image.
 
