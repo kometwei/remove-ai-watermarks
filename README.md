@@ -30,7 +30,7 @@ Strips SynthID, C2PA Content Credentials, EXIF/XMP "Made with AI" labels, and vi
 | --- | --- | --- | --- | --- |
 | **Google Gemini / Nano Banana / Gemini 3 Pro** | ✅ Sparkle logo | ✅ SynthID v1 + v2 (default SDXL pipeline, native resolution) | ✅ C2PA + EXIF | Alpha reversal + diffusion + metadata strip |
 | **OpenAI DALL-E 3 / ChatGPT** | — | — | ✅ C2PA manifest | Metadata strip |
-| **OpenAI ChatGPT Images 2.0** (gpt-image-2) | — | ⚠️ imperceptible pixel watermark (no public detector yet) | ✅ C2PA manifest (verified) | Diffusion regeneration + metadata strip |
+| **OpenAI ChatGPT Images 2.0** (gpt-image-2) | — | ✅ SynthID + content-specific pixel watermark (since May 2026; no local decoder, openai.com/verify oracle) | ✅ C2PA manifest (verified) | Diffusion regeneration + metadata strip |
 | **Stable Diffusion / SDXL (AUTOMATIC1111, ComfyUI)** | — | ✅ DWT-DCT (imwatermark — locally detectable) | ✅ PNG text chunks | Diffusion regeneration + metadata strip |
 | **Black Forest Labs FLUX** | — | ✅ DWT-DCT (imwatermark — locally detectable) | ✅ C2PA (FLUX.2 Pro) | Diffusion regeneration + metadata strip |
 | **Adobe Firefly** | — | — | ✅ Content Credentials (C2PA) | Metadata strip |
