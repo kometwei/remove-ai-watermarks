@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -277,6 +278,24 @@ def exif_generator(image_path: Path) -> str | None:
     return None
 
 
+# xAI / Grok EXIF signature scheme. A 64+ char base64 blob after "Signature:"
+# is far beyond any incidental description text, and the UUID Artist makes the
+# pair xAI-specific -- both required keeps the false-positive rate near zero.
+_XAI_SIGNATURE_RE = re.compile(r"Signature:\s*[A-Za-z0-9+/=]{64,}")
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+
+
+def _is_xai_signature_pair(description: str, artist: str) -> bool:
+    """True if an EXIF (ImageDescription, Artist) pair is xAI/Grok's scheme."""
+    return _XAI_SIGNATURE_RE.match(description) is not None and _UUID_RE.fullmatch(artist) is not None
+
+
+def _exif_text(ifd: dict, tag: int) -> str:
+    """Decode a piexif 0th-IFD byte tag to a stripped string ('' if absent)."""
+    value = ifd.get(tag)
+    return value.decode("latin1", "replace").strip() if isinstance(value, bytes) else ""
+
+
 def xai_signature(image_path: Path) -> bool:
     """Detect xAI / Grok's EXIF provenance signature scheme.
 
@@ -289,8 +308,6 @@ def xai_signature(image_path: Path) -> bool:
     validity. It survives only on the *original* JPEG download -- the web-UI
     image is a re-encoded WebP that drops EXIF.
     """
-    import re
-
     try:
         import piexif
         from PIL import Image
@@ -304,19 +321,52 @@ def xai_signature(image_path: Path) -> bool:
         logger.debug("xAI-signature EXIF read failed for %s: %s", image_path, exc)
         return False
 
-    def _text(tag: int) -> str:
-        value = tags.get(tag)
-        return value.decode("latin1", "replace").strip() if isinstance(value, bytes) else ""
-
-    description = _text(piexif.ImageIFD.ImageDescription)
-    artist = _text(piexif.ImageIFD.Artist)
-    # A 64+ char base64 blob after "Signature:" is far beyond any incidental
-    # description text, and the UUID Artist makes the pair xAI-specific.
-    has_signature = re.match(r"Signature:\s*[A-Za-z0-9+/=]{64,}", description) is not None
-    is_uuid = (
-        re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", artist, re.IGNORECASE) is not None
+    return _is_xai_signature_pair(
+        _exif_text(tags, piexif.ImageIFD.ImageDescription), _exif_text(tags, piexif.ImageIFD.Artist)
     )
-    return has_signature and is_uuid
+
+
+def _scrub_ai_exif(exif_dict: dict) -> list[str]:
+    """Delete AI-provenance tags from a piexif dict's ``0th`` IFD, in place.
+
+    Removes (a) the xAI/Grok signature pair (``ImageDescription`` "Signature: ..."
+    + UUID ``Artist``) and (b) any ``Software`` / ``Make`` / ``Artist`` /
+    ``ImageDescription`` tag whose value carries an ``AI_GENERATOR_TOKENS`` token
+    (Ideogram's ``Make``, Firefly's ``Software``, etc.). Mirrors the detection in
+    ``xai_signature`` / ``exif_generator`` so removal scrubs exactly what
+    ``identify`` flags, while leaving genuine camera/editor EXIF intact. Returns
+    the names of the removed tags (for logging).
+    """
+    import piexif
+
+    from remove_ai_watermarks.noai.constants import AI_GENERATOR_TOKENS
+
+    ifd = exif_dict.get("0th")
+    if not ifd:
+        return []
+
+    drop: dict[int, str] = {}
+
+    # (a) xAI / Grok: the Signature blob and the UUID Artist go together.
+    if _is_xai_signature_pair(
+        _exif_text(ifd, piexif.ImageIFD.ImageDescription), _exif_text(ifd, piexif.ImageIFD.Artist)
+    ):
+        drop[piexif.ImageIFD.ImageDescription] = "ImageDescription"
+        drop[piexif.ImageIFD.Artist] = "Artist"
+
+    # (b) Known AI generator token in any of the text tags.
+    for tag, name in (
+        (piexif.ImageIFD.Software, "Software"),
+        (piexif.ImageIFD.Make, "Make"),
+        (piexif.ImageIFD.Artist, "Artist"),
+        (piexif.ImageIFD.ImageDescription, "ImageDescription"),
+    ):
+        if any(token in _exif_text(ifd, tag).lower() for token in AI_GENERATOR_TOKENS):
+            drop[tag] = name
+
+    for tag in drop:
+        ifd.pop(tag, None)
+    return list(drop.values())
 
 
 def get_ai_metadata(image_path: Path) -> dict[str, str]:
@@ -456,6 +506,10 @@ def remove_ai_metadata(
             save_kwargs["pnginfo"] = pnginfo
 
         if exif_data and save_kwargs["format"] == "JPEG":
+            # Scrub AI-provenance EXIF tags (xAI/Grok signature, generator tokens)
+            # while keeping genuine camera/editor EXIF; PNG output drops EXIF entirely.
+            if removed := _scrub_ai_exif(exif_data):
+                logger.info("Scrubbed AI EXIF tag(s): %s", ", ".join(removed))
             with contextlib.suppress(Exception):
                 save_kwargs["exif"] = piexif.dump(exif_data)
 

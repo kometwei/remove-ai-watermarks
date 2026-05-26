@@ -471,6 +471,44 @@ class TestXaiSignature:
         assert has_ai_metadata(_grok_jpeg(tmp_path)) is True
 
 
+class TestRemoveAiExif:
+    """remove_ai_metadata scrubs AI-provenance EXIF tags but keeps genuine EXIF."""
+
+    def test_grok_signature_stripped_on_jpeg_output(self, tmp_path: Path):
+        src = _grok_jpeg(tmp_path)
+        assert xai_signature(src) is True
+        out = tmp_path / "clean.jpg"
+        remove_ai_metadata(src, out)
+        assert xai_signature(out) is False
+        assert has_ai_metadata(out) is False
+
+    def test_generator_make_token_stripped(self, tmp_path: Path):
+        # Ideogram's EXIF Make="Ideogram AI" must be scrubbed on removal.
+        exif = piexif.dump({"0th": {piexif.ImageIFD.Make: b"Ideogram AI"}, "Exif": {}, "GPS": {}, "1st": {}})
+        src = tmp_path / "ideogram.jpg"
+        Image.new("RGB", (64, 64)).save(src, exif=exif)
+        out = tmp_path / "clean.jpg"
+        remove_ai_metadata(src, out)
+        assert exif_generator(out) is None
+
+    def test_real_camera_exif_preserved(self, tmp_path: Path):
+        # A real-camera Make ("Apple") carries no AI token and must survive.
+        exif = piexif.dump(
+            {
+                "0th": {piexif.ImageIFD.Make: b"Apple", piexif.ImageIFD.Model: b"iPhone 15"},
+                "Exif": {},
+                "GPS": {},
+                "1st": {},
+            }
+        )
+        src = tmp_path / "photo.jpg"
+        Image.new("RGB", (64, 64)).save(src, exif=exif)
+        out = tmp_path / "out.jpg"
+        remove_ai_metadata(src, out)
+        kept = piexif.load(Image.open(out).info["exif"])["0th"]
+        assert kept.get(piexif.ImageIFD.Make) == b"Apple"
+
+
 class TestAIGCLabel:
     """China TC260 AIGC labeling (Doubao and other China-served generators)."""
 
