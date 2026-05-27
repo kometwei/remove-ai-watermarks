@@ -618,6 +618,11 @@ def cmd_identify(ctx: click.Context, source: Path, no_visible: bool, as_json: bo
     console.print(f"\n  Verdict: {verdict}  [dim](confidence: {report.confidence})[/]")
     console.print(f"  Platform: {report.platform or '[dim]undetermined[/]'}")
 
+    if report.integrity_clashes:
+        console.print("\n  [bold red]⚠ Integrity clash[/] [dim](provenance signals contradict each other)[/]")
+        for clash in report.integrity_clashes:
+            console.print(f"  [red]- {clash}[/]")
+
     if report.watermarks:
         table = Table(show_header=True, header_style="bold", title="Watermarks / provenance markers")
         table.add_column("Marker", style="cyan")

@@ -17,7 +17,9 @@ from remove_ai_watermarks.identify import (
     ProvenanceReport,
     _ai_tools_in,
     _attribute_platform,
+    _integrity_clashes,
     _issuers_in,
+    _vendor_of,
     identify,
 )
 
@@ -447,3 +449,101 @@ class TestIdentifyAIGC:
         r = identify(self._aigc_png(tmp_path), check_visible=False)
         sig = next(s for s in r.signals if s.name == "aigc")
         assert "BYTEDANCE001" in sig.detail
+
+
+# ── Integrity clashes (contradictions between independent signals) ──────
+
+
+class TestVendorOf:
+    def test_openai_variants(self):
+        assert _vendor_of("OpenAI (ChatGPT / gpt-image / DALL-E / Sora)") == "OpenAI"
+        assert _vendor_of("DALL-E 3") == "OpenAI"
+
+    def test_google_variants(self):
+        assert _vendor_of("Google (Gemini / Imagen)") == "Google"
+        assert _vendor_of("Imagen 3") == "Google"
+
+    def test_other_vendors(self):
+        assert _vendor_of("Ideogram AI") == "Ideogram"
+        assert _vendor_of("Adobe Firefly") == "Adobe"
+        assert _vendor_of("Stability AI (Stable Image)") == "Stability AI"
+
+    def test_camera_label_is_not_an_ai_vendor(self):
+        # Camera platform labels must NOT normalize to an AI vendor, or a camera
+        # capture would be mistaken for AI-generation in clash detection.
+        assert _vendor_of("Leica (camera, C2PA capture)") is None
+
+    def test_unknown_is_none(self):
+        assert _vendor_of("a regular photo") is None
+        assert _vendor_of(None) is None
+
+
+class TestIntegrityClashesHelper:
+    def test_two_ai_vendors_clash(self):
+        clashes = _integrity_clashes({"c2pa": "OpenAI", "exif_generator": "Ideogram"}, None, camera_has_ai_marker=True)
+        assert len(clashes) == 1
+        assert "OpenAI" in clashes[0]
+        assert "Ideogram" in clashes[0]
+
+    def test_same_vendor_two_signals_no_clash(self):
+        # C2PA Google + SynthID-Google proxy is consistent, not a contradiction.
+        assert _integrity_clashes({"c2pa": "Google", "synthid": "Google"}, None, camera_has_ai_marker=True) == []
+
+    def test_single_vendor_no_clash(self):
+        assert _integrity_clashes({"c2pa": "OpenAI"}, None, camera_has_ai_marker=True) == []
+
+    def test_empty_no_clash(self):
+        assert _integrity_clashes({}, None, camera_has_ai_marker=False) == []
+
+    def test_camera_plus_ai_marker_clashes(self):
+        clashes = _integrity_clashes(
+            {"exif_generator": "Ideogram"},
+            "Google Pixel (camera, C2PA capture)",
+            camera_has_ai_marker=True,
+        )
+        assert any("Camera-capture" in c and "Pixel" in c for c in clashes)
+
+    def test_camera_without_ai_marker_no_clash(self):
+        # A clean camera capture (the normal case for our Pixel/Leica/Sony files)
+        # must NOT raise a clash.
+        assert _integrity_clashes({}, "Leica (camera, C2PA capture)", camera_has_ai_marker=False) == []
+
+
+class TestIntegrityClashEndToEnd:
+    def _c2pa_jpeg(self, tmp_path: Path, blob: bytes) -> Path:
+        path = tmp_path / "img.jpg"
+        path.write_bytes(b"\xff\xd8\xff\xe1jumbc2pa" + blob + b"\xff\xd9")
+        return path
+
+    def test_two_generator_stamps_clash(self, tmp_path: Path):
+        # An OpenAI C2PA manifest (AI source) on an image that ALSO carries a
+        # China TC260 AIGC label = two independent generator stamps naming
+        # different origins -> a laundering tell.
+        path = self._c2pa_jpeg(tmp_path, b"OpenAI ... trainedAlgorithmicMedia ... TC260:AIGC label")
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.integrity_clashes
+        assert any("Conflicting AI-origin" in c for c in r.integrity_clashes)
+
+    def test_single_stamp_no_clash(self, tmp_path: Path):
+        path = self._c2pa_jpeg(tmp_path, b"OpenAI ... trainedAlgorithmicMedia")
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.integrity_clashes == []
+
+    def test_clash_serializes_to_json(self, tmp_path: Path):
+        path = self._c2pa_jpeg(tmp_path, b"OpenAI ... trainedAlgorithmicMedia ... TC260:AIGC label")
+        r = identify(path, check_visible=False, check_invisible=False)
+        payload = json.loads(json.dumps(asdict(r), default=str))
+        assert payload["integrity_clashes"] == r.integrity_clashes
+
+
+@pytest.mark.skipif(not SAMPLES_DIR.exists(), reason="data/samples not present")
+@pytest.mark.parametrize("fixture", ["chatgpt-1.png", "firefly-1.png", "doubao-1.png", "grok-1.jpg", "mj-1.png"])
+class TestRealSamplesHaveNoClash:
+    """Every real single-origin fixture must report zero clashes (false-positive guard)."""
+
+    def test_no_false_positive_clash(self, fixture: str):
+        path = SAMPLES_DIR / fixture
+        if not path.exists():
+            pytest.skip(f"{fixture} not present")
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.integrity_clashes == []

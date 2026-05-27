@@ -110,6 +110,11 @@ class ProvenanceReport:
     watermarks: list[str] = field(default_factory=list[str])
     signals: list[Signal] = field(default_factory=list["Signal"])
     caveats: list[str] = field(default_factory=list[str])
+    # Contradictions between independent provenance signals (e.g. two different
+    # AI vendors both claiming the image, or camera-capture credentials next to
+    # AI-generation markers). Non-empty means the provenance is internally
+    # inconsistent -- a strong tell of spoofed, transplanted, or laundered metadata.
+    integrity_clashes: list[str] = field(default_factory=list[str])
 
 
 def _issuers_in(data: bytes) -> list[str]:
@@ -188,6 +193,88 @@ def _attribute_platform(issuers: list[str], *, is_ai: bool = True) -> str | None
     return None
 
 
+# Coarse origin-vendor normalization for integrity-clash detection. Two signals
+# that resolve to the SAME key are consistent (a C2PA "Google (Gemini)" issuer
+# and a SynthID-Google proxy, or Adobe Firefly + its Adobe TrustMark soft
+# binding); two DIFFERENT keys from independent generator stamps are a
+# contradiction (a C2PA OpenAI manifest on an image whose EXIF says "Ideogram
+# AI"). Substring match on the lowercased platform/detail string; first hit wins,
+# so order specific tokens before brand umbrellas where they overlap.
+_AI_VENDOR_TOKENS: tuple[tuple[str, str], ...] = (
+    ("gpt-image", "OpenAI"),
+    ("dall", "OpenAI"),
+    ("sora", "OpenAI"),
+    ("openai", "OpenAI"),
+    ("gemini", "Google"),
+    ("imagen", "Google"),
+    ("nano banana", "Google"),
+    ("google", "Google"),
+    ("firefly", "Adobe"),
+    ("adobe", "Adobe"),
+    ("bing", "Microsoft"),
+    ("designer", "Microsoft"),
+    ("microsoft", "Microsoft"),
+    ("stability", "Stability AI"),
+    ("stable diffusion", "Stability AI"),
+    ("sdxl", "Stability AI"),
+    ("ideogram", "Ideogram"),
+    ("grok", "xAI"),
+    ("aurora", "xAI"),
+    ("xai", "xAI"),
+)
+
+
+def _vendor_of(text: str | None) -> str | None:
+    """Normalize a platform/generator string to a coarse origin-vendor key, or None."""
+    if not text:
+        return None
+    low = text.lower()
+    for token, vendor in _AI_VENDOR_TOKENS:
+        if token in low:
+            return vendor
+    return None
+
+
+def _integrity_clashes(
+    ai_vendors: dict[str, str], camera_label: str | None, *, camera_has_ai_marker: bool
+) -> list[str]:
+    """Surface contradictions between independent provenance signals.
+
+    Args:
+        ai_vendors: family name -> normalized AI-origin vendor, one entry per
+            generator-stamped signal (C2PA issuer when the source is AI, SynthID
+            proxy, EXIF/XMP generator tag, IPTC AISystemUsed, xAI, AIGC label).
+        camera_label: a camera/verified-capture C2PA device platform, if one was
+            identified (Pixel, Leica, Sony, Nikon, Truepic), else None.
+        camera_has_ai_marker: True when an AI-generation stamp coexists with the
+            camera credentials.
+
+    Returns:
+        Human-readable clash descriptions; empty when the signals agree.
+    """
+    clashes: list[str] = []
+
+    by_vendor: dict[str, list[str]] = {}
+    for family, vendor in ai_vendors.items():
+        by_vendor.setdefault(vendor, []).append(family)
+    if len(by_vendor) >= 2:
+        parts = [f"{vendor} (via {', '.join(sorted(fams))})" for vendor, fams in sorted(by_vendor.items())]
+        clashes.append(
+            "Conflicting AI-origin attributions from independent signals: "
+            + " vs ".join(parts)
+            + " -- one provenance set was likely spoofed, transplanted, or laundered."
+        )
+
+    if camera_label and camera_has_ai_marker:
+        vendors = ", ".join(sorted(set(ai_vendors.values()))) or "present"
+        clashes.append(
+            f"Camera-capture C2PA credentials ({camera_label}) coexist with AI-generation markers "
+            f"({vendors}) -- a genuine camera capture is not AI-generated, so the provenance is inconsistent."
+        )
+
+    return clashes
+
+
 def _visible_sparkle(image_path: Path) -> float | None:
     """Visible Gemini-sparkle confidence in [0, 1], or None if unavailable.
 
@@ -251,6 +338,13 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
     signals: list[Signal] = []
     watermarks: list[str] = []
     caveats: list[str] = []
+    # One normalized origin vendor per generator-stamped signal, for integrity-
+    # clash detection (see _integrity_clashes). Visible sparkle and the open
+    # invisible watermark are deliberately excluded: the former is a fuzzy visual
+    # score, the latter can be a by-product of our own SDXL removal pass, so
+    # neither is a trustworthy "the generator stamped its identity" claim.
+    ai_vendor_claims: dict[str, str] = {}
+    camera_label = _device_platform(head)
 
     # ── C2PA Content Credentials ────────────────────────────────────
     has_c2pa = bool(info) or b"c2pa" in head.lower() or C2PA_UUID in head
@@ -271,11 +365,17 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
     # signer/producer), with the issuer byte-scan only as fallback. The issuer
     # scan alone mis-attributed real samples (Leica->Truepic timestamp authority,
     # Nikon->Adobe namespace, Pixel->Google Gemini) -- the device scan fixes that.
-    platform = (_device_platform(head) or _attribute_platform(issuers, is_ai=c2pa_is_ai)) if has_c2pa else None
+    platform = (camera_label or _attribute_platform(issuers, is_ai=c2pa_is_ai)) if has_c2pa else None
     if has_c2pa:
         detail = ", ".join(filter(None, [", ".join(issuers), generator, info.get("source_type")]))
         signals.append(Signal("c2pa", detail or "C2PA manifest present", "high"))
         watermarks.append(f"C2PA Content Credentials ({', '.join(issuers) or 'unknown signer'})")
+        # Record the AI-origin vendor for clash detection only when the source is
+        # actually AI -- classify the issuer attribution / generator, NOT the
+        # resolved `platform` (which may be a camera device token whose label,
+        # e.g. "Google Pixel", would mis-normalize to an AI vendor).
+        if c2pa_is_ai and (v := (_vendor_of(_attribute_platform(issuers, is_ai=True)) or _vendor_of(generator))):
+            ai_vendor_claims["c2pa"] = v
 
     # ── SynthID metadata proxy ──────────────────────────────────────
     # get_ai_metadata already sets synthid_watermark for both PNG (caBX parser)
@@ -286,6 +386,8 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         caveats.append(_SYNTHID_CAVEAT)
         if "OpenAI" in (" ".join(issuers) + synthid):
             caveats.append(_OPENAI_CAVEAT)
+        if v := _vendor_of(synthid):
+            ai_vendor_claims["synthid"] = v
 
     # ── C2PA soft-binding: a named forensic/third-party watermark vendor ─
     # (Adobe TrustMark, Digimarc, Imatag, ...). Present in the manifest even when
@@ -315,6 +417,8 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         watermarks.append(f"IPTC 2025.1 AI disclosure ({system})" if named else "IPTC 2025.1 AI disclosure fields")
         if platform is None and named:
             platform = f"{system} (IPTC AISystemUsed)"
+        if named and (v := _vendor_of(system)):
+            ai_vendor_claims["iptc_ai_system"] = v
 
     # ── China TC260 AIGC label (Doubao and other China-served gens) ──
     aigc = any(m in head for m in AIGC_MARKERS)
@@ -324,6 +428,7 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         watermarks.append("China AIGC label (TC260 standard)")
         if platform is None:
             platform = "China AIGC-labeled generator (TC260; e.g. Doubao)"
+        ai_vendor_claims["aigc"] = "China AIGC (TC260)"
 
     # ── Local diffusion parameters (Stable Diffusion / ComfyUI) ──────
     local_keys = sorted(k for k in meta if k.lower() in _LOCAL_GEN_KEYS)
@@ -340,6 +445,8 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         watermarks.append(f"Embedded generator tag: {generator_tag}")
         if platform is None:
             platform = f"{generator_tag} (EXIF/XMP generator tag)"
+        if v := _vendor_of(generator_tag):
+            ai_vendor_claims["exif_generator"] = v
 
     # ── xAI / Grok EXIF signature scheme (no C2PA/SynthID/IPTC) ──────
     # Grok's only provenance signal: EXIF ImageDescription "Signature: <base64>"
@@ -350,6 +457,7 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         watermarks.append("xAI/Grok EXIF signature")
         if platform is None:
             platform = "xAI (Grok / Aurora)"
+        ai_vendor_claims["xai"] = "xAI"
 
     # ── Open invisible watermark (SD / SDXL / FLUX, dwtDct) ──────────
     # Public decoder, no key -- a definitive embedded signal on pristine files.
@@ -404,6 +512,9 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         is_ai = None
         confidence = "none"
 
+    # ── Integrity clashes: contradictions between independent signals ─
+    clashes = _integrity_clashes(ai_vendor_claims, camera_label, camera_has_ai_marker=bool(ai_vendor_claims))
+
     caveats.append(_STRIP_CAVEAT)
     # De-duplicate while preserving order.
     caveats = list(dict.fromkeys(caveats))
@@ -416,4 +527,5 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         watermarks=watermarks,
         signals=signals,
         caveats=caveats,
+        integrity_clashes=clashes,
     )
