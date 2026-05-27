@@ -17,7 +17,7 @@ If this tool saves you time, consider [sponsoring its development](https://githu
 - **Visible watermark removal** — Gemini / Nano Banana sparkle logo (reverse alpha blending) and the Doubao "豆包AI生成" text strip (locate + mask + inpaint); fast, offline, deterministic, no GPU. `visible --mark auto` picks the right one
 - **Universal region eraser (`erase`)** — remove any logo / watermark / object inside boxes you specify, regardless of position or colour. Default cv2 inpainting (CPU, instant); optional big-LaMa via onnxruntime (`lama` extra) for higher quality
 - **Invisible watermark removal** — SynthID, StableSignature, TreeRing via diffusion-based regeneration (needs a local GPU, or run it with no setup on [raiw.cc](https://raiw.cc))
-- **AI metadata stripping** — EXIF, PNG text chunks, C2PA provenance manifests (PNG / JPEG / AVIF / HEIF / JPEG-XL, and **MP4 / MOV / M4V video** at the container level), XMP DigitalSourceType
+- **AI metadata stripping** — EXIF, PNG text chunks, C2PA provenance manifests (PNG / JPEG / AVIF / HEIF / JPEG-XL, **MP4 / MOV / M4V / M4A** at the container level, and **WebM / MP3 / WAV / FLAC / OGG** losslessly via ffmpeg), XMP DigitalSourceType
 - **"Made with AI" label removal** — removes the metadata that triggers AI labels on Instagram, Facebook, X (Twitter)
 - **Analog Humanizer** — film grain and chromatic aberration to bypass AI image classifiers
 - **Smart Face Protection** — automatic extraction and blending of human faces to prevent AI distortion
@@ -322,7 +322,11 @@ Tracked but not yet implemented:
 - **Grow the SynthID reference corpus** (`data/synthid_corpus/`) with oracle-labeled samples per model and resolution (Gemini app for Google, openai.com/verify for OpenAI). Prerequisite for any pixel-detector attempt and for an automated removal-regression set.
 - **Real non-PNG C2PA fixtures**. SynthID-source detection for JPEG / WebP / AVIF is currently covered only by synthetic byte blobs; replace with real vendor-emitted files to ground the binary-scan path.
 - **Maintenance debt**. Clear strict-pyright debt in `remove_ai_metadata` / `cli.py` (untyped piexif / PIL / click / rich) so `maintain.sh` can finish green. (`uv-secure` is already clean since `idna` was bumped to 3.16.)
-- **AVIF / HEIF / JPEG-XL detection limits**. Removal strips top-level C2PA `uuid` and JUMBF `jumb` boxes. EXIF/XMP boxes inside these containers are not yet scrubbed (PNG and JPEG are fully covered).
+- **AVIF / HEIF EXIF/XMP inside the `meta` box**. Removal already strips top-level C2PA `uuid` / JUMBF `jumb` boxes and any AI-labelled top-level XMP `uuid` box, and non-ISOBMFF audio/video (WebM, MP3, WAV, FLAC, OGG) is stripped losslessly via ffmpeg. Still open: EXIF/XMP stored as *items inside the `meta` box* (typical for AVIF/HEIF stills) — needs `meta`-box surgery (iinf/iloc + mdat splice) or `exiftool` (a non-bundled binary dependency).
+- **Multi-signal contradiction reporting ("Integrity Clash")**. When a C2PA manifest claims human authorship but a watermark / IPTC signal indicates AI (or signals otherwise disagree), `identify` should surface the *contradiction* rather than collapse to one verdict (per [arXiv:2603.02378](https://arxiv.org/abs/2603.02378)). Pure aggregation logic — no new dependency or sample needed.
+- **More C2PA device signers**. Leica, Nikon, Google Pixel, Sony, and Truepic are mapped (each verified against a real signed file). Canon and Samsung Galaxy (AI-edit) are deferred until a real signed sample surfaces — no public direct-download C2PA file exists for them today (upload-to-verify / news-agency-licensed only).
+- **C2PA detection window for streaming MP4**. Non-PNG detection scans the first 1 MB; a manifest placed after a large `mdat` in a streaming MP4 can be missed (front-placed manifests, the common case, are caught).
+- **Resemble PerTh audio detection** — evaluated, not feasible with the public API: `get_watermark()` returns a raw bit array with no presence/confidence flag, so watermarked vs. clean audio can't be reliably separated without Resemble's fixed payload or a confidence service. Same wall as the SynthID pixel detector.
 - **Video pipeline (`noai-video`)**: per-frame inpainting and tracking for Sora 2 dynamic logo, Veo 3.1 badge, Kling, Runway. Separate package, not folded into this repo.
 
 Won't fix:
