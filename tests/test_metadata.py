@@ -322,6 +322,44 @@ class TestRemoveAiMetadata:
         assert result == jpg_path
         assert jpg_path.exists()
 
+    def test_jpeg_output_is_high_quality(self, tmp_path):
+        """JPEG output uses high quality + 4:4:4 (no chroma subsampling), not the
+        lossy PIL defaults (quality 75, 4:2:0) that visibly degrade the image."""
+        from PIL.JpegImagePlugin import get_sampling
+
+        img = Image.new("RGB", (64, 64), color=(100, 150, 200))
+        png_path = tmp_path / "source.png"
+        img.save(png_path)
+
+        jpg_path = tmp_path / "output.jpg"
+        remove_ai_metadata(png_path, jpg_path)
+
+        with Image.open(jpg_path) as out:
+            assert get_sampling(out) == 0  # 4:4:4, no chroma subsampling
+            # quality 95 quantization tables stay well below the q75 defaults
+            # (whose max quant value is ~40+); q95 tops out around 12.
+            assert max(max(t) for t in out.quantization.values()) <= 15
+
+    def test_webp_output_preserves_format_losslessly(self, tmp_path):
+        """A .webp output keeps the WebP format (not silently rewritten to PNG)
+        and is pixel-identical to the source (lossless)."""
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        arr = rng.integers(0, 255, (48, 48, 3), dtype=np.uint8)
+        src = Image.fromarray(arr, "RGB")
+        pnginfo = PngInfo()
+        pnginfo.add_text("parameters", "ai stuff")
+        png_path = tmp_path / "source.png"
+        src.save(png_path, pnginfo=pnginfo)
+
+        webp_path = tmp_path / "output.webp"
+        remove_ai_metadata(png_path, webp_path)
+
+        with Image.open(webp_path) as out:
+            assert out.format == "WEBP"
+            assert np.array_equal(np.asarray(out.convert("RGB")), arr)
+
     def test_creates_parent_directories(self, tmp_path):
         img = Image.new("RGB", (32, 32))
         pnginfo = PngInfo()

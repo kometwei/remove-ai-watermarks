@@ -695,8 +695,20 @@ def remove_ai_metadata(
         save_kwargs: dict[str, Any] = {}
         if fmt in (".jpg", ".jpeg"):
             save_kwargs["format"] = "JPEG"
+            # JPEG output is unavoidably lossy, so minimize the loss: high quality
+            # and no chroma subsampling (4:4:4). Without these PIL defaults to
+            # quality 75 + 4:2:0, which visibly degrades a re-saved image.
+            save_kwargs["quality"] = 95
+            save_kwargs["subsampling"] = 0
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
+        elif fmt == ".webp":
+            # Preserve the WebP container losslessly instead of silently rewriting
+            # it as PNG (which changes the format and bloats the file).
+            save_kwargs["format"] = "WEBP"
+            save_kwargs["lossless"] = True
+            if img.mode == "P":  # WebP cannot encode palette mode
+                img = img.convert("RGBA" if "transparency" in img.info else "RGB")
         else:
             save_kwargs["format"] = "PNG"
 
