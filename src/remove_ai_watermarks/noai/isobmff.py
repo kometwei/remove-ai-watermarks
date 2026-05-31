@@ -17,6 +17,7 @@ Reference: ISO/IEC 14496-12 (ISOBMFF) and C2PA 2.1 spec §11.
 
 from __future__ import annotations
 
+import logging
 import re
 import struct
 from typing import TYPE_CHECKING
@@ -31,6 +32,8 @@ from remove_ai_watermarks.metadata import (
     IPTC_AI_FIELD_MARKERS,
     IPTC_AI_MARKERS,
 )
+
+log = logging.getLogger(__name__)
 
 # Top-level box types that may carry AI provenance. ``uuid`` boxes are checked
 # against ``C2PA_UUID`` / AI-label markers before being stripped; ``jumb`` boxes
@@ -126,6 +129,8 @@ def scan_c2pa_region(path: str | Path, *, max_total: int = 4 * 1024 * 1024) -> b
                 else:
                     size = size32
                 if size < (payload_off - pos) or pos + size > file_size:
+                    # Detection-only: a malformed box halts the walk, so a manifest
+                    # placed after it is missed (best-effort scan; no resync).
                     break
                 if box_type in C2PA_BOX_TYPES:
                     f.seek(payload_off)
@@ -162,7 +167,9 @@ def strip_c2pa_boxes(data: bytes) -> tuple[bytes, int]:
 
     out = bytearray()
     stripped = 0
+    consumed = 0
     for start, end, box_type, payload_off in _iter_top_level_boxes(data):
+        consumed = end
         if box_type == b"uuid":
             # uuid boxes carry the 16-byte UUID immediately after the type.
             is_c2pa = payload_off + 16 <= end and data[payload_off : payload_off + 16] == C2PA_UUID
@@ -174,6 +181,20 @@ def strip_c2pa_boxes(data: bytes) -> tuple[bytes, int]:
             stripped += 1
             continue
         out.extend(data[start:end])
+
+    # Fail-safe: the walker returns early on a malformed box (bad size, or a box
+    # that runs past EOF), so anything after it was never visited. Emitting `out`
+    # would silently truncate the file from the bad box to EOF -- worse than not
+    # stripping. If the walk did not consume the whole input, return it unchanged.
+    if consumed != len(data):
+        log.warning(
+            "ISOBMFF box walk stopped at offset %d of %d (malformed box); "
+            "returning input unchanged to avoid truncation",
+            consumed,
+            len(data),
+        )
+        return data, 0
+
     return bytes(out), stripped
 
 

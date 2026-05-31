@@ -222,7 +222,14 @@ class DoubaoEngine:
         """
         h, w = image.shape[:2]
         x, y, bw, bh = loc.bbox
-        roi = image[y : y + bh, x : x + bw].astype(np.float32)
+        # Normalize the ROI to 3-channel BGR: a 2D grayscale or 4-channel BGRA
+        # input would otherwise break the axis=2 channel reductions below.
+        roi = image[y : y + bh, x : x + bw]
+        if roi.ndim == 2:
+            roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+        elif roi.shape[2] == 4:
+            roi = cv2.cvtColor(roi, cv2.COLOR_BGRA2BGR)
+        roi = roi.astype(np.float32)
 
         luma = roi.mean(axis=2)
         sat = roi.max(axis=2) - roi.min(axis=2)
@@ -290,7 +297,12 @@ class DoubaoEngine:
         if at is None:
             return None
         h, w = image.shape[:2]
-        gw, gh = max(1, int(_ALPHA_WIDTH_FRAC * w)), max(1, int(_ALPHA_HEIGHT_FRAC * w))
+        # Glyph box scales with WIDTH; on a wide/short image the height-from-width
+        # box can exceed the image height. Clamp both dims so the slice assignment
+        # below cannot overflow (a degenerate 2048x1 input otherwise raised
+        # ValueError on the broadcast). Normal images are unaffected.
+        gw = min(w, max(1, int(_ALPHA_WIDTH_FRAC * w)))
+        gh = min(h, max(1, int(_ALPHA_HEIGHT_FRAC * w)))
         ax = max(0, w - int(_ALPHA_MARGIN_RIGHT_FRAC * w) - gw)
         ay = max(0, h - int(_ALPHA_MARGIN_BOTTOM_FRAC * w) - gh)
         amap = np.zeros((h, w), np.float32)
@@ -353,6 +365,12 @@ class DoubaoEngine:
         inpaint there costs nothing and reliably clears the mark).
         Call only when :meth:`reverse_alpha_available` and the mark is detected.
         """
+        # Normalize to 3-channel BGR so a 2D grayscale or 4-channel BGRA input
+        # does not break the reverse-alpha math (which assumes a 3-channel logo).
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
         at_native = abs(image.shape[1] / _ALPHA_NATIVE_WIDTH - 1.0) <= _ALPHA_NATIVE_BAND
         if at_native:
             amap = self._fixed_alpha_map(image)

@@ -389,6 +389,56 @@ class TestIdentifyCaveats:
         assert len(r.caveats) == len(set(r.caveats))
 
 
+class TestOpenAiCaveatVendorScoped:
+    """The OpenAI rollout caveat keys on the normalized SynthID vendor, not a raw
+    "OpenAI" substring over the issuer + verdict blob -- so a Google-SynthID
+    manifest with an incidental "OpenAI" byte elsewhere is not mislabeled, while
+    a genuine OpenAI manifest still gets the hedge.
+    """
+
+    @staticmethod
+    def _png_chunk(ctype: bytes, data: bytes) -> bytes:
+        import struct
+        import zlib
+
+        return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
+
+    def _png(self, tmp_path: Path, name: str, *extra: bytes) -> Path:
+        import struct
+        import zlib
+
+        ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+        body = (
+            b"\x89PNG\r\n\x1a\n"
+            + self._png_chunk(b"IHDR", ihdr)
+            + self._png_chunk(b"IDAT", zlib.compress(b"\x00" * 6, 9))
+            + b"".join(extra)
+            + self._png_chunk(b"IEND", b"")
+        )
+        path = tmp_path / name
+        path.write_bytes(body)
+        return path
+
+    def test_google_synthid_with_incidental_openai_byte_no_caveat(self, tmp_path: Path):
+        # Google C2PA/SynthID manifest in caBX; the byte "OpenAI" lives in a
+        # separate tEXt chunk (e.g. a trust-chain note), not as a SynthID vendor.
+        png = self._png(
+            tmp_path,
+            "g.png",
+            self._png_chunk(b"caBX", b"jumbc2pa Google ... trainedAlgorithmicMedia"),
+            self._png_chunk(b"tEXt", b"note\x00signed via OpenAI trust chain"),
+        )
+        r = identify(png, check_visible=False, check_invisible=False)
+        assert any("SynthID pixel watermark (likely present (Google" in w for w in r.watermarks)
+        assert not any("before the rollout" in c for c in r.caveats)
+
+    def test_openai_synthid_still_gets_caveat(self, tmp_path: Path):
+        png = self._png(tmp_path, "oa.png", self._png_chunk(b"caBX", b"jumbc2pa OpenAI ... trainedAlgorithmicMedia"))
+        r = identify(png, check_visible=False, check_invisible=False)
+        assert any("SynthID pixel watermark (likely present (OpenAI" in w for w in r.watermarks)
+        assert any("before the rollout" in c for c in r.caveats)
+
+
 class TestReportSerializable:
     def test_report_is_json_serializable(self, tmp_png_with_ai_metadata: Path):
         # The CLI --json path relies on asdict + json.dumps(default=str).
@@ -656,6 +706,19 @@ class TestIntegrityClashEndToEnd:
         path = self._c2pa_jpeg(tmp_path, b"OpenAI ... trainedAlgorithmicMedia")
         r = identify(path, check_visible=False, check_invisible=False)
         assert r.integrity_clashes == []
+
+    def test_camera_device_plus_ai_marker_clash(self, tmp_path: Path):
+        # Integrity-clash rule #2: a camera-capture C2PA device token (Pixel
+        # Camera) coexisting with an independent AI-generation marker (a China
+        # TC260 AIGC label) -- a genuine camera capture is not AI-generated, so
+        # the provenance is inconsistent (a laundering / spoofing tell).
+        path = self._c2pa_jpeg(
+            tmp_path,
+            b'Pixel Camera ... <TC260:AIGC>{"Label":"1","ContentProducer":"BYTEDANCE001"}</TC260:AIGC>',
+        )
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.platform == "Google Pixel (camera, C2PA capture)"
+        assert any("Camera-capture C2PA credentials" in c and "AI-generation markers" in c for c in r.integrity_clashes)
 
     def test_clash_serializes_to_json(self, tmp_path: Path):
         path = self._c2pa_jpeg(tmp_path, b"OpenAI ... trainedAlgorithmicMedia ... TC260:AIGC label")

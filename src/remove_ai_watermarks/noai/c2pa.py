@@ -55,6 +55,9 @@ def has_c2pa_metadata(image_path: Path) -> bool:
             if signature != PNG_SIGNATURE:
                 return False
 
+            file_size = f.seek(0, 2)
+            f.seek(8)
+
             while True:
                 chunk_header = f.read(8)
                 if len(chunk_header) < 8:
@@ -62,9 +65,12 @@ def has_c2pa_metadata(image_path: Path) -> bool:
 
                 length = struct.unpack(">I", chunk_header[:4])[0]
                 chunk_type = chunk_header[4:8]
+                # Clamp the attacker-controlled 32-bit length to the bytes that
+                # actually remain, so a malformed huge length can't allocate GBs.
+                safe_length = max(0, min(length, file_size - f.tell()))
 
                 if chunk_type == C2PA_CHUNK_TYPE:
-                    chunk_data = f.read(length)
+                    chunk_data = f.read(safe_length)
                     # Check for any C2PA signature
                     for sig in C2PA_SIGNATURES:
                         if sig in chunk_data:
@@ -74,7 +80,7 @@ def has_c2pa_metadata(image_path: Path) -> bool:
                         return True
                     f.read(4)
                 else:
-                    f.read(length + 4)
+                    f.seek(safe_length + 4, 1)
 
                 if chunk_type == b"IEND":
                     break
@@ -108,6 +114,9 @@ def extract_c2pa_info(image_path: Path) -> dict[str, Any]:
             if signature != PNG_SIGNATURE:
                 return c2pa_info
 
+            file_size = f.seek(0, 2)
+            f.seek(8)
+
             while True:
                 chunk_header = f.read(8)
                 if len(chunk_header) < 8:
@@ -115,13 +124,16 @@ def extract_c2pa_info(image_path: Path) -> dict[str, Any]:
 
                 length = struct.unpack(">I", chunk_header[:4])[0]
                 chunk_type = chunk_header[4:8]
+                # Clamp the attacker-controlled 32-bit length to the bytes that
+                # actually remain, so a malformed huge length can't allocate GBs.
+                safe_length = max(0, min(length, file_size - f.tell()))
 
                 if chunk_type == C2PA_CHUNK_TYPE:
-                    chunk_data = f.read(length)
+                    chunk_data = f.read(safe_length)
                     _parse_c2pa_chunk(chunk_data, c2pa_info)
                     f.read(4)
                 else:
-                    f.read(length + 4)
+                    f.seek(safe_length + 4, 1)
 
                 if chunk_type == b"IEND":
                     break
@@ -278,6 +290,9 @@ def extract_c2pa_chunk(image_path: Path) -> bytes | None:
             if signature != PNG_SIGNATURE:
                 return None
 
+            file_size = f.seek(0, 2)
+            f.seek(8)
+
             while True:
                 chunk_header = f.read(8)
                 if len(chunk_header) < 8:
@@ -285,9 +300,12 @@ def extract_c2pa_chunk(image_path: Path) -> bytes | None:
 
                 length = struct.unpack(">I", chunk_header[:4])[0]
                 chunk_type = chunk_header[4:8]
+                # Clamp the attacker-controlled 32-bit length to the bytes that
+                # actually remain, so a malformed huge length can't allocate GBs.
+                safe_length = max(0, min(length, file_size - f.tell()))
 
                 if chunk_type == C2PA_CHUNK_TYPE:
-                    chunk_data = f.read(length)
+                    chunk_data = f.read(safe_length)
                     crc = f.read(4)
 
                     # Check for any C2PA signature
@@ -299,7 +317,7 @@ def extract_c2pa_chunk(image_path: Path) -> bytes | None:
                     if b"jumb" in chunk_data.lower() or b"c2pa" in chunk_data.lower():
                         return chunk_header + chunk_data + crc
                 else:
-                    f.read(length + 4)
+                    f.seek(safe_length + 4, 1)
 
                 if chunk_type == b"IEND":
                     break

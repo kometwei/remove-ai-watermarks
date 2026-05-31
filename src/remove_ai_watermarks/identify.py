@@ -431,7 +431,7 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
     if synthid:
         watermarks.append(f"SynthID pixel watermark ({synthid})")
         caveats.append(_SYNTHID_CAVEAT)
-        if "OpenAI" in (" ".join(issuers) + synthid):
+        if _vendor_of(synthid) == "OpenAI":
             caveats.append(_OPENAI_CAVEAT)
         if v := _vendor_of(synthid):
             ai_vendor_claims["synthid"] = v

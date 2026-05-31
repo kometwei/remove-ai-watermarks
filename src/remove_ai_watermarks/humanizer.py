@@ -36,10 +36,14 @@ def apply_analog_humanizer(image: NDArray, grain_intensity: float = 4.0, chromat
     b, g, r = cv2.split(image)
 
     # 1. Chromatic Aberration
-    # Shift R channel left, B channel right
+    # Shift R channel left, B channel right. np.roll is circular, so it wraps
+    # the opposite edge into a thin colored fringe at the L/R borders; replicate
+    # the original edge columns there to keep the intended offset interior-only.
     if chromatic_shift > 0:
         r = np.roll(r, -chromatic_shift, axis=1)
+        r[:, -chromatic_shift:] = r[:, -chromatic_shift - 1 : -chromatic_shift]
         b = np.roll(b, chromatic_shift, axis=1)
+        b[:, :chromatic_shift] = b[:, chromatic_shift : chromatic_shift + 1]
 
     merged = cv2.merge((b, g, r))
 

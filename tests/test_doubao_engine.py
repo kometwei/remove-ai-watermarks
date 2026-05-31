@@ -161,3 +161,28 @@ class TestReverseAlpha:
         assert float(np.abs(wm.astype(np.float32)[mark] - 100.0).mean()) > 15  # mark visible
         out = eng.remove_watermark_reverse_alpha(wm).astype(np.float32)
         assert float(np.abs(out[mark] - 100.0).mean()) < max_err
+
+
+class TestDegenerateAndChannelInputs:
+    """Removal must not crash on degenerate sizes or non-3-channel inputs."""
+
+    @pytest.mark.parametrize(("w", "h"), [(2048, 1), (1, 2048), (2048, 8)])
+    def test_wide_short_does_not_raise(self, w, h):
+        """A wide/short image at native width makes the width-derived glyph box
+        taller than the image; the slice assignment must not ValueError."""
+        eng = DoubaoEngine()
+        img = np.zeros((h, w, 3), np.uint8)
+        out = eng.remove_watermark_reverse_alpha(img)
+        assert out.shape == img.shape
+
+    def test_grayscale_2d_does_not_raise(self):
+        eng = DoubaoEngine()
+        gray = np.zeros((2048, 2048), np.uint8)
+        out = eng.remove_watermark_reverse_alpha(gray)
+        assert out.shape == (2048, 2048, 3)
+
+    def test_bgra_4channel_does_not_raise(self):
+        eng = DoubaoEngine()
+        bgra = np.zeros((2048, 2048, 4), np.uint8)
+        out = eng.remove_watermark_reverse_alpha(bgra)
+        assert out.shape == (2048, 2048, 3)

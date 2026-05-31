@@ -72,3 +72,8 @@ class TestFailureSemantics:
         path = tmp_path / "garbage.png"
         path.write_bytes(b"not an image")
         assert image_io.imread(path) is None
+
+    def test_imwrite_to_missing_directory_returns_false(self, tmp_path: Path) -> None:
+        # An unwritable path must return False (cv2.imwrite contract), not raise.
+        path = tmp_path / "no-such-dir" / "out.png"
+        assert image_io.imwrite(path, _make_bgr()) is False

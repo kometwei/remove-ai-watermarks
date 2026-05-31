@@ -328,9 +328,12 @@ class TestISOBMFF:
     def test_truncated_largesize_terminates_safely(self):
         # size32==1 promises a 64-bit largesize, but the box ends after 8 bytes;
         # iteration must stop rather than read the missing largesize past EOF.
-        cleaned, stripped = strip_c2pa_boxes(FTYP + b"\x00\x00\x00\x01uuid")
+        # The walk halts before EOF, so the fail-safe returns the input unchanged
+        # (emitting only FTYP would silently truncate the file).
+        data = FTYP + b"\x00\x00\x00\x01uuid"
+        cleaned, stripped = strip_c2pa_boxes(data)
         assert stripped == 0
-        assert cleaned == FTYP
+        assert cleaned == data
 
 
 class TestC2PAInvalidSignature:

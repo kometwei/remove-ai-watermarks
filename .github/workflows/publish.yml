@@ -17,6 +17,16 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
+      - name: Verify release tag matches package version
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "([^"]+)"/\1/')"
+          if [ "${tag#v}" != "$version" ]; then
+            echo "Release tag '$tag' does not match pyproject.toml version '$version'" >&2
+            exit 1
+          fi
+          echo "Release tag '$tag' matches package version '$version'"
+
       - name: Build package
         run: uv build
 

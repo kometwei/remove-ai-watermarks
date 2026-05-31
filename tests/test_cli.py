@@ -541,3 +541,78 @@ class TestGpuHintMarkup:
         with patch("remove_ai_watermarks.invisible_engine.is_available", return_value=False):
             result = runner.invoke(main, ["all", str(sample_png)])
         assert "remove-ai-watermarks[gpu]" in result.output
+
+
+class TestEraseCommand:
+    """Tests for the 'erase' universal region eraser subcommand."""
+
+    def test_erase_help(self, runner):
+        result = runner.invoke(main, ["erase", "--help"])
+        assert result.exit_code == 0
+        assert "--region" in result.output
+        assert "--backend" in result.output
+
+    def test_erase_single_region(self, runner, sample_png, tmp_path):
+        output = tmp_path / "erased.png"
+        result = runner.invoke(
+            main,
+            ["erase", str(sample_png), "--region", "10,10,40,40", "-o", str(output)],
+        )
+        assert result.exit_code == 0, result.output
+        assert output.exists()
+
+    def test_erase_two_regions(self, runner, sample_png, tmp_path):
+        output = tmp_path / "erased2.png"
+        result = runner.invoke(
+            main,
+            [
+                "erase",
+                str(sample_png),
+                "--region",
+                "10,10,30,30",
+                "--region",
+                "120,120,30,30",
+                "-o",
+                str(output),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert output.exists()
+        # The banner reports the region count it processed.
+        assert "2 region(s)" in result.output
+
+    def test_erase_default_output_name(self, runner, sample_png):
+        result = runner.invoke(main, ["erase", str(sample_png), "--region", "10,10,40,40"])
+        assert result.exit_code == 0, result.output
+        assert sample_png.with_stem(sample_png.stem + "_clean").exists()
+
+    def test_erase_malformed_region_exits_nonzero(self, runner, sample_png, tmp_path):
+        output = tmp_path / "x.png"
+        # Only three values: click.BadParameter -> non-zero exit, no output file.
+        result = runner.invoke(
+            main,
+            ["erase", str(sample_png), "--region", "1,2,3", "-o", str(output)],
+        )
+        assert result.exit_code != 0
+        assert not output.exists()
+
+    def test_erase_nonexistent_file(self, runner):
+        result = runner.invoke(main, ["erase", "/nonexistent/file.png", "--region", "0,0,10,10"])
+        assert result.exit_code != 0
+
+    def test_erase_lama_backend_without_onnxruntime(self, runner, sample_png, tmp_path):
+        # The LaMa backend needs onnxruntime; without it the CLI must surface a
+        # clear error and exit non-zero rather than crash. When onnxruntime IS
+        # installed there is no missing-dep path to exercise, so skip.
+        from remove_ai_watermarks.region_eraser import lama_available
+
+        if lama_available():
+            pytest.skip("onnxruntime installed; missing-dep error path not reachable")
+        output = tmp_path / "y.png"
+        result = runner.invoke(
+            main,
+            ["erase", str(sample_png), "--region", "10,10,40,40", "--backend", "lama", "-o", str(output)],
+        )
+        assert result.exit_code != 0
+        assert "onnxruntime" in result.output.lower()
+        assert not output.exists()

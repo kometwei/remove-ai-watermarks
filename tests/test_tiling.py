@@ -43,6 +43,16 @@ class TestTilePositions:
         # 1024 wide, 512 tile, no overlap -> two tiles butting at 512.
         assert tile_positions(1024, 512, 0) == [0, 512]
 
+    def test_overlap_equal_to_tile_raises(self):
+        # overlap == tile makes the stride denominator (tile - overlap) zero;
+        # reject up front instead of dividing by zero.
+        with pytest.raises(ValueError, match="overlap"):
+            tile_positions(2000, 512, 512)
+
+    def test_overlap_greater_than_tile_raises(self):
+        with pytest.raises(ValueError, match="overlap"):
+            tile_positions(2000, 512, 600)
+
 
 class TestMakeBlendWeight:
     def test_zero_overlap_is_all_ones(self):

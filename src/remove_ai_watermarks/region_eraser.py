@@ -67,8 +67,16 @@ def erase_cv2(
     method: Literal["telea", "ns"] = "telea",
     radius: int = 6,
 ) -> NDArray[Any]:
-    """Inpaint ``mask`` with classical cv2 inpainting (CPU, no extra deps)."""
+    """Inpaint ``mask`` with classical cv2 inpainting (CPU, no extra deps).
+
+    Accepts 1-/3-channel BGR (passed straight to ``cv2.inpaint``) and 4-channel
+    BGRA: ``cv2.inpaint`` rejects 4 channels, so the alpha plane is split off,
+    the BGR is inpainted, and alpha is re-attached unchanged.
+    """
     flag = cv2.INPAINT_TELEA if method == "telea" else cv2.INPAINT_NS
+    if image_bgr.ndim == 3 and image_bgr.shape[2] == 4:
+        bgr = cv2.inpaint(image_bgr[:, :, :3], mask, radius, flag)
+        return np.dstack([bgr, image_bgr[:, :, 3]])
     return cv2.inpaint(image_bgr, mask, radius, flag)
 
 

@@ -445,6 +445,31 @@ class TestRemoveAiMetadata:
         assert isinstance(result, Path)
         assert result == output
 
+    def _sd_png(self, tmp_path: Path) -> Path:
+        img = Image.new("RGB", (32, 32), color=(80, 80, 80))
+        pnginfo = PngInfo()
+        pnginfo.add_text("parameters", "Steps: 20, Sampler: Euler")
+        img.save(tmp_path / "sd.png", pnginfo=pnginfo)
+        return tmp_path / "sd.png"
+
+    def test_png_to_jpeg_strips_ai(self, tmp_path):
+        # Cross-format output: the AI text chunk must not survive the PNG->JPEG
+        # re-encode, by detection AND by raw bytes.
+        out = tmp_path / "clean.jpg"
+        remove_ai_metadata(self._sd_png(tmp_path), out)
+        assert not has_ai_metadata(out)
+        body = out.read_bytes()
+        assert b"parameters" not in body
+        assert b"Steps" not in body
+
+    def test_png_to_webp_strips_ai(self, tmp_path):
+        out = tmp_path / "clean.webp"
+        remove_ai_metadata(self._sd_png(tmp_path), out)
+        assert not has_ai_metadata(out)
+        body = out.read_bytes()
+        assert b"parameters" not in body
+        assert b"Steps" not in body
+
 
 def _img_with_software(tmp_path: Path, fmt: str, software: str) -> Path:
     """Write a tiny image carrying an EXIF Software tag."""
@@ -616,6 +641,41 @@ class TestRemoveAiExif:
         remove_ai_metadata(src, out)
         kept = piexif.load(Image.open(out).info["exif"])["0th"]
         assert kept.get(piexif.ImageIFD.Make) == b"Apple"
+
+    def test_xai_pair_stripped_but_genuine_camera_tags_kept(self, tmp_path: Path):
+        # An image carrying BOTH the xAI Signature pair (ImageDescription =
+        # "Signature: <base64>" + UUID Artist) AND genuine non-AI camera tags.
+        # The scrub must delete only the xAI pair, leaving the camera tags intact.
+        sig = "Signature: " + "A" * 120
+        artist = "12345678-1234-1234-1234-123456789abc"
+        exif = piexif.dump(
+            {
+                "0th": {
+                    piexif.ImageIFD.ImageDescription: sig.encode(),
+                    piexif.ImageIFD.Artist: artist.encode(),
+                    piexif.ImageIFD.Make: b"Canon",
+                    piexif.ImageIFD.Model: b"EOS R5",
+                },
+                "Exif": {piexif.ExifIFD.DateTimeOriginal: b"2024:01:01 12:00:00"},
+                "GPS": {piexif.GPSIFD.GPSLatitudeRef: b"N"},
+                "1st": {},
+            }
+        )
+        src = tmp_path / "grok_plus_cam.jpg"
+        Image.new("RGB", (32, 32)).save(src, exif=exif)
+        out = tmp_path / "scrubbed.jpg"
+        remove_ai_metadata(src, out)
+
+        # xAI signature pair is gone (xai_signature returns a bool, not None).
+        assert xai_signature(out) is False
+        kept = piexif.load(Image.open(out).info["exif"])
+        assert kept["0th"].get(piexif.ImageIFD.ImageDescription) is None
+        assert kept["0th"].get(piexif.ImageIFD.Artist) is None
+        # Genuine camera tags are preserved.
+        assert kept["0th"].get(piexif.ImageIFD.Make) == b"Canon"
+        assert kept["0th"].get(piexif.ImageIFD.Model) == b"EOS R5"
+        assert kept["Exif"].get(piexif.ExifIFD.DateTimeOriginal) == b"2024:01:01 12:00:00"
+        assert kept["GPS"].get(piexif.GPSIFD.GPSLatitudeRef) == b"N"
 
 
 class TestAIGCLabel:

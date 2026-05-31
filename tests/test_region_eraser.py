@@ -66,6 +66,23 @@ class TestEraseCv2:
         assert np.array_equal(img, out)
 
 
+class TestNonBgrInputs:
+    """cv2.inpaint rejects 4-channel BGRA and 2D-only entry points must work."""
+
+    def test_grayscale_2d_does_not_raise(self):
+        gray = np.full((100, 100), 120, np.uint8)
+        out = erase(gray, boxes=[(40, 40, 20, 20)], backend="cv2")
+        assert out.shape == gray.shape
+
+    def test_bgra_preserves_alpha_and_does_not_raise(self):
+        bgra = np.full((100, 100, 4), 120, np.uint8)
+        bgra[..., 3] = 200  # opaque-ish alpha plane
+        out = erase(bgra, boxes=[(40, 40, 20, 20)], backend="cv2", dilate=0)
+        assert out.shape == bgra.shape
+        # alpha plane is carried through unchanged
+        assert np.array_equal(out[..., 3], bgra[..., 3])
+
+
 class TestLamaBackend:
     def test_lama_raises_when_unavailable(self):
         img = np.full((100, 100, 3), 50, np.uint8)

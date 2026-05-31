@@ -329,16 +329,21 @@ class GeminiEngine:
         """
         result = image.copy()
 
-        # Handle alpha channel
-        if result.shape[2] == 4:
+        # Normalize to 3-channel BGR up front: 2D grayscale (no channel axis) and
+        # 4-channel BGRA both reach this public entry point and would otherwise
+        # crash on the channel-count checks / downstream 3-channel math.
+        if result.ndim == 2:
+            result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+        elif result.shape[2] == 4:
             result = cv2.cvtColor(result, cv2.COLOR_BGRA2BGR)
         elif result.shape[2] == 1:
             result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
 
         size = force_size or get_watermark_size(result.shape[1], result.shape[0])
 
-        # Detect dynamic position & size
-        detection = self.detect_watermark(image, force_size=size)
+        # Detect dynamic position & size (on the normalized 3-channel image so a
+        # grayscale/BGRA input does not crash the detector).
+        detection = self.detect_watermark(result, force_size=size)
 
         if not detection.detected:
             logger.debug(

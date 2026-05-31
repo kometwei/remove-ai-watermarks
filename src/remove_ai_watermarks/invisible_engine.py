@@ -73,7 +73,7 @@ class InvisibleEngine:
     """
 
     # SDXL base is the default since May 2026: empirically defeats SynthID v2
-    # at strength=0.05 / steps=50 / native ~1024px. See CLAUDE.md "Known
+    # at strength=0.10 / steps=50 / native ~1024px. See CLAUDE.md "Known
     # limitations" for the regression evidence ruling out SD-1.5 pipelines.
     DEFAULT_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
     CTRLREGEN_MODEL_ID = "yepengliu/ctrlregen"
@@ -227,6 +227,8 @@ class InvisibleEngine:
                 from remove_ai_watermarks import image_io
 
                 out_cv = image_io.imread(out_path, cv2.IMREAD_COLOR)
+                if out_cv is None:
+                    return out_path
 
                 if protect_faces and original_faces:
                     if self._progress_callback:

@@ -20,6 +20,8 @@ from PIL import Image
 
 def tile_positions(total: int, tile: int, overlap: int) -> list[int]:
     """Compute evenly-spaced tile start positions covering *total* pixels."""
+    if not (0 <= overlap < tile):
+        raise ValueError(f"overlap must satisfy 0 <= overlap < tile (got overlap={overlap}, tile={tile})")
     if total <= tile:
         return [0]
     n = max(2, math.ceil((total - overlap) / (tile - overlap)))

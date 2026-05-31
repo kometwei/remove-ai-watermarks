@@ -22,6 +22,7 @@ signal, not proof of AI origin.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -32,7 +33,9 @@ log = logging.getLogger(__name__)
 # Adobe ships Variant P in production (com.adobe.trustmark.P).
 _MODEL_TYPE = "P"
 # Lazily constructed singleton -- model load + first-use download is expensive.
+# Guarded by a lock so concurrent callers don't double-construct/double-download.
 _tm: Any = None
+_tm_lock = threading.Lock()
 
 
 def is_available() -> bool:
@@ -45,9 +48,11 @@ def is_available() -> bool:
 def _decoder() -> Any:
     global _tm
     if _tm is None:
-        from trustmark import TrustMark
+        with _tm_lock:
+            if _tm is None:
+                from trustmark import TrustMark
 
-        _tm = TrustMark(verbose=False, model_type=_MODEL_TYPE)
+                _tm = TrustMark(verbose=False, model_type=_MODEL_TYPE)
     return _tm
 
 

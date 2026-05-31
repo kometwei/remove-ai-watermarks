@@ -190,6 +190,8 @@ def _png_late_metadata(image_path: Path, window: int) -> bytes:
         with open(image_path, "rb") as f:
             if f.read(8) != b"\x89PNG\r\n\x1a\n":
                 return b""
+            f.seek(0, 2)
+            file_size = f.tell()
             pos = 8
             while True:
                 f.seek(pos)
@@ -201,9 +203,12 @@ def _png_late_metadata(image_path: Path, window: int) -> bytes:
                 if chunk_type == b"IEND":
                     break
                 data_start = pos + 8
+                # Clamp the attacker-controlled 32-bit length to the bytes that
+                # actually remain, so a malformed huge length can't allocate GBs.
+                safe_length = max(0, min(length, file_size - data_start))
                 if chunk_type in _PNG_META_CHUNKS and data_start >= window:
                     f.seek(data_start)
-                    out += f.read(length)
+                    out += f.read(safe_length)
                 pos = data_start + length + 4  # data + CRC
     except OSError as exc:
         logger.debug("PNG late-metadata scan failed on %s: %s", image_path, exc)

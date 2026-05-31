@@ -54,7 +54,8 @@ def imwrite(path: str | Path, img: NDArray[Any]) -> bool:
 
     The output format is taken from the path extension (e.g. ``.png``), exactly
     like ``cv2.imwrite``. Returns ``True`` on success, ``False`` if the codec
-    rejects the image.
+    rejects the image or the path cannot be written (matching ``cv2.imwrite``,
+    which returns ``False`` rather than raising on an unwritable path).
     """
     import cv2
 
@@ -62,5 +63,8 @@ def imwrite(path: str | Path, img: NDArray[Any]) -> bool:
     ok, buf = cv2.imencode(ext, img)
     if not ok:
         return False
-    buf.tofile(str(path))
+    try:
+        buf.tofile(str(path))
+    except OSError:
+        return False
     return True

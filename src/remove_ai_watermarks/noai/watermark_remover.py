@@ -272,6 +272,12 @@ def _make_seed_generator(device: str, seed: int) -> Any:
         return torch.Generator().manual_seed(seed)  # type: ignore
 
 
+def _generator_device(generator: Any) -> str:
+    """Best-effort device type of a ``torch.Generator`` (e.g. ``"cpu"``, ``"mps"``)."""
+    device = getattr(generator, "device", None)
+    return getattr(device, "type", str(device)) if device is not None else "cpu"
+
+
 # Keep legacy name available for backwards compatibility
 _detect_model_profile_from_id = detect_model_profile
 
@@ -677,6 +683,14 @@ class WatermarkRemover:
 
         base = self._run_img2img(init_image, strength, num_inference_steps, guidance_scale, generator)
 
+        # The base pass may have fallen back from MPS to CPU (it flips
+        # self.device). The generator was built for the original device, and
+        # diffusers rejects a device-mismatched generator ("Expected a 'cpu'
+        # device generator but found 'mps'"), so drop it for the per-region
+        # passes -- they then seed from the global RNG, which is fine here.
+        if generator is not None and self.device == "cpu" and _generator_device(generator) != "cpu":
+            generator = None
+
         bgr = cv2.cvtColor(np.array(init_image), cv2.COLOR_RGB2BGR)
         try:
             boxes = text_protector.TextProtector().detect_text_boxes(bgr)
@@ -718,8 +732,13 @@ class WatermarkRemover:
             # the composite even though the text is crisp.
             cg = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
             dg = cv2.cvtColor(down, cv2.COLOR_BGR2GRAY).astype(np.float32)
-            (sx, sy), _resp = cv2.phaseCorrelate(cg, dg)
-            if abs(sx) > 0.1 or abs(sy) > 0.1:
+            (sx, sy), resp = cv2.phaseCorrelate(cg, dg)
+            # Only correct for the real 1-2px round-trip shift. On a near-flat /
+            # low-contrast crop phaseCorrelate returns a spurious large offset at
+            # a tiny response (e.g. (19,19) at resp ~0.005); warping by that
+            # garbles the composite -- the exact failure this was meant to
+            # prevent. Gate on both a confident response and a plausible offset.
+            if resp > 0.3 and abs(sx) < 4 and abs(sy) < 4 and (abs(sx) > 0.1 or abs(sy) > 0.1):
                 m = np.float32([[1, 0, -sx], [0, 1, -sy]])
                 down = cv2.warpAffine(down, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
             out_bgr = text_protector.feather_paste(out_bgr, down, x, y)

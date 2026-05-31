@@ -98,11 +98,11 @@ The removal pipeline (default profile, SDXL):
 ```text
 image → encode to latent space (VAE) at native resolution
       → add controlled noise (forward diffusion)
-      → denoise (reverse diffusion, ~50 steps at strength 0.05)
+      → denoise (reverse diffusion, ~50 steps at strength 0.10)
       → decode back to pixels (VAE)
 ```
 
-By default the image is processed at its **native resolution** with no pre-downscale, matching the hosted raiw.cc backend (fal `fast-sdxl`, which is `stabilityai/stable-diffusion-xl-base-1.0` — the same checkpoint the CLI defaults to). At strength ~0.05 SDXL img2img does not need the input shrunk, and the old forced downscale-to-1024 then upscale-back round-trip was the main quality loss. Pass `--max-resolution N` to cap the long side only when a very large image runs out of GPU/MPS memory (it reintroduces that lossy round-trip).
+- Native resolution avoids shrinking the input to 1024 px first; that down-then-up round-trip was the main quality loss (issue #10). Use `--max-resolution N` only to cap GPU/MPS memory on very large inputs.
 
 SDXL is the default since May 2026: empirically defeats SynthID v2 on Gemini 3 Pro outputs, where the older SD-1.5 pipeline at 768 px did not. The SD-1.5 path was removed once it was verified not to handle v2. Note the scope: this defeats the SynthID *verifier*, which is not the same as being forensically indistinguishable from a real photo. Recent work ([arXiv:2605.09203](https://arxiv.org/abs/2605.09203)) shows watermark-removal pipelines leave detectable traces, so a separate "this image was processed" classifier can still flag the output.
 

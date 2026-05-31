@@ -50,3 +50,23 @@ def test_invalid_shape():
     img[0, 0] = 50
     result = apply_analog_humanizer(img)
     assert np.array_equal(img, result)
+
+
+def test_chromatic_shift_does_not_wrap_opposite_edge():
+    # On a horizontal gradient (dark left, bright right), a circular np.roll
+    # would wrap the bright right edge into the R channel's left border and the
+    # dark left edge into the B channel's right border, producing a colored
+    # fringe. After the fix the border columns must replicate their own edge.
+    ramp = np.linspace(0, 255, 64, dtype=np.uint8)
+    gray = np.broadcast_to(ramp, (32, 64))
+    img = np.stack([gray, gray, gray], axis=2).copy()  # B, G, R
+
+    shift = 3
+    result = apply_analog_humanizer(img, grain_intensity=0.0, chromatic_shift=shift)
+
+    # B (index 0) rolled right -> its left border must stay dark (near 0),
+    # NOT wrap the bright right edge.
+    assert result[:, :shift, 0].max() < 60
+    # R (index 2) rolled left -> its right border must stay bright (near 255),
+    # NOT wrap the dark left edge.
+    assert result[:, -shift:, 2].min() > 195

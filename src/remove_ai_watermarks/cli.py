@@ -160,7 +160,6 @@ def main(ctx: click.Context, verbose: bool) -> None:
 )
 @click.option("--inpaint-strength", type=float, default=0.85, help="Inpainting blend strength (0.0-1.0).")
 @click.option("--detect/--no-detect", default=True, help="Detect watermark before removal.")
-@click.option("--detect-threshold", type=float, default=0.25, help="Detection confidence threshold.")
 @click.option(
     "--mark",
     type=click.Choice(["auto", *watermark_registry.mark_keys()]),
@@ -178,7 +177,6 @@ def cmd_visible(
     inpaint_method: Literal["ns", "telea", "gaussian"],
     inpaint_strength: float,
     detect: bool,
-    detect_threshold: float,
     mark: str,
     strip_metadata: bool,
 ) -> None:
