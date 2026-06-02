@@ -108,19 +108,18 @@ The removal pipeline (default profile, SDXL):
 ```text
 image → encode to latent space (VAE) at native resolution
       → add controlled noise (forward diffusion)
-      → denoise (reverse diffusion, ~50 steps at strength 0.30)
+      → denoise (reverse diffusion, ~50 steps; strength is vendor-adaptive:
+        0.10 OpenAI / 0.15 Google / 0.15 unknown, override with --strength)
       → decode back to pixels (VAE)
 ```
 
 - Native resolution avoids shrinking the input to 1024 px first; that down-then-up round-trip was the main quality loss (issue #10). Use `--max-resolution N` only to cap GPU/MPS memory on very large inputs.
 
-> **Default strength is `0.30`, tuned to remove the current Google SynthID.** An oracle-verified study (fresh Gemini images, "Verify with SynthID") found the current SynthID survives `0.10`/`0.15`/`0.20` and clears only at `0.30`. SynthID is a moving target (the threshold has climbed `0.05` → `0.10` → `~0.30` as Google hardens it), and there is no local SynthID detector, so the tool cannot self-check and auto-tune. If the oracle still reads SynthID, raise `--strength` further; if you care more about preserving fine text, lower it. `0.30` softens dense typography somewhat, so use the lowest value that comes back clean on the oracle.
+> **Default strength is vendor-adaptive (no flag needed).** The tool reads the C2PA issuer to detect which vendor's SynthID is present and picks the strength that clears it with the least quality loss: **OpenAI gpt-image → `0.10`**, **Google Gemini → `0.15`**, **unknown source → `0.15`**. An oracle-verified June 2026 study (clean pipeline, per-image openai.com/verify or Gemini app) found OpenAI's watermark clears at `0.05` across `1024`-`1600` px (resolution-independent) while Google's is ~3x more robust and needs `0.15`. The dominant factor is the vendor, not resolution. There is no local SynthID detector, so if the oracle still reads SynthID, raise `--strength`; if you care more about preserving fine text, lower it. (Caveat: Google's `0.15` was validated on the capped `--max-resolution 1536` path; a very large native Gemini image may need more.)
 >
 > **Text and face protection are OFF by default.** The high-resolution text re-scrub can shield SynthID in text regions, leaving the watermark intact there even after the global pass clears it everywhere else (verified June 2026: same image, with `--protect-text` → SynthID detected; without → SynthID removed). Both features are opt-in with `--protect-text` / `--protect-faces` and considered **experimental**. If you enable them, verify the result with the oracle.
 >
-> **OpenAI / ChatGPT images do not carry Google SynthID** (they use C2PA metadata, stripped by the metadata step), so `0.30` is overkill there; `--strength 0.10` preserves quality and the metadata strip is what matters.
->
-> **`--pipeline ctrlregen` is experimental and not recommended.** On paper CtrlRegen ([ICLR 2025](https://github.com/yepengliu/CtrlRegen)) regenerates from near-clean Gaussian noise to defeat robust watermarks, but in testing on real images it **destroys content** — smooth and background regions fill with hallucinated micro-text — and it is heavy (several GB of extra models, minutes per image). It has no usable middle setting (too low removes nothing, high enough to remove wrecks the image), so the shippable path is the default SDXL pipeline at `~0.30`. CtrlRegen stays available for experimentation only.
+> **`--pipeline ctrlregen` is experimental and not recommended.** On paper CtrlRegen ([ICLR 2025](https://github.com/yepengliu/CtrlRegen)) regenerates from near-clean Gaussian noise to defeat robust watermarks, but in testing on real images it **destroys content** — smooth and background regions fill with hallucinated micro-text — and it is heavy (several GB of extra models, minutes per image). It has no usable middle setting (too low removes nothing, high enough to remove wrecks the image), so the shippable path is the default SDXL pipeline at the vendor-adaptive strength. CtrlRegen stays available for experimentation only.
 
 SDXL is the default since May 2026: empirically defeats SynthID v2 on Gemini 3 Pro outputs, where the older SD-1.5 pipeline at 768 px did not. The SD-1.5 path was removed once it was verified not to handle v2. Note the scope: this defeats the SynthID *verifier*, which is not the same as being forensically indistinguishable from a real photo. Recent work ([arXiv:2605.09203](https://arxiv.org/abs/2605.09203)) shows watermark-removal pipelines leave detectable traces, so a separate "this image was processed" classifier can still flag the output.
 
@@ -274,7 +273,9 @@ remove-ai-watermarks erase image.png --region 1640,1930,400,100 -o clean.png
 remove-ai-watermarks invisible image.png -o clean.png --humanize 4.0
 # Runs at native resolution by default. On a very large image that OOMs the
 # GPU/MPS, cap the long side: --max-resolution 2048
-# Text / CJK glyphs are preserved automatically; disable with --no-protect-text
+# Strength is vendor-adaptive by default (OpenAI 0.10 / Google 0.15); override
+# with --strength. Text/face protection is opt-in (--protect-text /
+# --protect-faces, experimental: they can shield SynthID).
 
 # Check / strip AI metadata (C2PA, EXIF, "Made with AI" labels)
 # --check also flags SynthID-bearing sources: a C2PA manifest signed by

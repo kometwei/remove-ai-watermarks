@@ -128,6 +128,7 @@ class InvisibleEngine:
         protect_faces: bool = False,
         protect_text: bool = False,
         max_resolution: int = 0,
+        vendor: str | None = None,
     ) -> Path:
         """Remove invisible watermark from an image.
 
@@ -217,6 +218,7 @@ class InvisibleEngine:
                 guidance_scale=guidance_scale,
                 seed=seed,
                 protect_text=protect_text,
+                vendor=vendor,
             )
 
             # Optional: Face restoration & Humanizer (Phase 2 - Post-processing)

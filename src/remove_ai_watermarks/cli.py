@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import click
 
 from remove_ai_watermarks import __version__, watermark_registry
-from remove_ai_watermarks.noai.watermark_profiles import resolve_strength
+from remove_ai_watermarks.noai.watermark_profiles import resolve_strength, vendor_for_strength
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -452,7 +452,8 @@ def cmd_erase(
     "--strength",
     type=float,
     default=None,
-    help="Denoising strength (0.0-1.0). Default: 0.30 (SDXL SynthID threshold); ctrlregen uses 1.0.",
+    help="Denoising strength (0.0-1.0). Default: vendor-adaptive (OpenAI 0.10 / Google 0.15 / "
+    "unknown 0.15, from the C2PA issuer); ctrlregen uses 1.0.",
 )
 @click.option("--steps", type=int, default=50, help="Number of denoising steps. Default: 50.")
 @click.option(
@@ -527,9 +528,12 @@ def cmd_invisible(
         progress_callback=progress_cb,
     )
 
+    # Detect the SynthID vendor from the ORIGINAL (before processing strips C2PA) so the
+    # displayed and executed strength agree on the vendor-adaptive default.
+    vendor = vendor_for_strength(source)
     console.print(f"  Input:    {source.name}")
     console.print(f"  Pipeline: {pipeline}")
-    console.print(f"  Strength: {resolve_strength(strength, pipeline)}  Steps: {steps}")
+    console.print(f"  Strength: {resolve_strength(strength, pipeline, vendor)}  Steps: {steps}")
 
     t0 = time.monotonic()
     result_path = engine.remove_watermark(
@@ -543,6 +547,7 @@ def cmd_invisible(
         protect_text=protect_text,
         protect_faces=protect_faces,
         max_resolution=max_resolution,
+        vendor=vendor,
     )
     elapsed = time.monotonic() - t0
 
@@ -689,7 +694,8 @@ def cmd_identify(ctx: click.Context, source: Path, no_visible: bool, as_json: bo
     "--strength",
     type=float,
     default=None,
-    help="Invisible watermark denoising strength. Default: 0.30 (SDXL); ctrlregen uses 1.0.",
+    help="Invisible watermark denoising strength. Default: vendor-adaptive "
+    "(OpenAI 0.10 / Google 0.15 / unknown 0.15); ctrlregen uses 1.0.",
 )
 @click.option("--steps", type=int, default=50, help="Number of denoising steps for invisible removal.")
 @click.option(
@@ -818,7 +824,11 @@ def cmd_all(
                 progress_callback=progress_cb,
             )
 
-            console.print(f"    Strength: {resolve_strength(strength, pipeline)}  Steps: {steps}")
+            # Detect the vendor from the pristine ORIGINAL (`source`); `tmp_path` has
+            # already lost its C2PA to the visible-removal pass, so reading it would
+            # always resolve to the unknown-vendor default.
+            vendor = vendor_for_strength(source)
+            console.print(f"    Strength: {resolve_strength(strength, pipeline, vendor)}  Steps: {steps}")
             inv_engine.remove_watermark(
                 image_path=tmp_path,
                 output_path=tmp_path,
@@ -829,6 +839,7 @@ def cmd_all(
                 protect_text=protect_text,
                 protect_faces=protect_faces,
                 max_resolution=max_resolution,
+                vendor=vendor,
             )
             console.print("    Invisible watermark removed")
 
@@ -941,6 +952,9 @@ def _process_batch_image(
                 seed=seed,
                 humanize=humanize,
                 max_resolution=max_resolution,
+                # Detect the vendor from the pristine original (`img_path`), not the
+                # visible-processed `out_path` whose C2PA is already gone.
+                vendor=vendor_for_strength(img_path),
             )
 
     if mode in ("metadata", "all"):

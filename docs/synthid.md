@@ -169,29 +169,51 @@ Limitations section of the paper (Section 10) was not recoverable from the
 public HTML version of arXiv:2510.09263v1 due to a rendering failure in the
 conversion (the body text of Section 10 is absent from the HTML).
 
-**What is known empirically from independent work and our own testing:**
+**What is known empirically from our own oracle-verified testing.**
 
-- **Diffusion regeneration / img2img** at sufficient strength degrades or
-  removes the watermark. Our testing (May-June 2026, Gemini oracle):
-  - strength 0.05: insufficient for current Gemini SynthID (survives)
-  - strength 0.10: removes Gemini SynthID (verified via Gemini app oracle, n=1)
-  - strength 0.30: current DEFAULT; removes Gemini SynthID (verified n=3 via
-    Gemini app oracle on fresh Gemini images, June 2026 oracle study)
-  - strength 0.30: **does NOT reliably remove OpenAI gpt-image SynthID on
-    1600x1600 images** (verified via openai.com/verify, issue #14 reports,
-    June 2026)
-  - strength 0.35 and 0.40: not yet oracle-verified on 1600x1600 gpt-image;
-    0.40 visibly corrupts text-heavy images
-  - **Resolution dependence confirmed**: same strength removes watermark on
-    small images (376x429) but not on large ones (1600x1600) -- larger images
-    appear to carry a stronger or more spatially distributed signal
-  - The production SynthID has been progressively hardened: 0.05 worked earlier
-    (pre-May 2026 Gemini), then 0.10 was needed, now 0.30 for Gemini and still
-    failing at 0.30 for 1600x1600 gpt-image. It is a moving target.
+A controlled study (June 2026, clean v0.8.6 with text/face protection OFF,
+native resolution on this repo's default SDXL pipeline) measured the minimum
+img2img strength that removes the SynthID pixel watermark, verified per image on
+the vendor's own oracle (openai.com/verify for OpenAI, the Gemini app "Verify
+with SynthID" for Google). The test set and per-image results are recorded in
+`data/synthid_corpus/` (manifest `verified_via` = `openai-verify` / `gemini-app`).
 
-- **Heavy JPEG compression** (quality < ~50-60): not specifically tested with
-  oracle verification; the DL approach is more robust than DWT-DCT but Google
-  acknowledges limits at "extreme" manipulation.
+| Vendor | Images | Resolution(s) | Pipeline | Removed at |
+|--------|--------|---------------|----------|------------|
+| OpenAI (gpt-image) | n=4 | 1024x1536 .. 1600x1600 | native | **0.05** |
+| Google (Gemini)    | n=4 | 2816x1536 -> capped 1536 | `--max-resolution 1536` | **0.15** (0.05 and 0.10 do NOT clear) |
+
+**Two findings, both oracle-verified:**
+
+1. **Vendor is the dominant factor, not resolution.** Google's SynthID is
+   roughly 3x more robust than OpenAI's: at a comparable (small) working
+   resolution, OpenAI clears at 0.05 while Google needs 0.15. This matches
+   Google having hardened SynthID more aggressively over time.
+
+2. **OpenAI SynthID removal is resolution-independent in the tested range.**
+   All four OpenAI images (including a 1600x1600) cleared at 0.05.
+
+**CORRECTION (supersedes the earlier "resolution dependence" claim).** A prior
+version of this doc and CLAUDE.md stated that strength 0.30 failed to remove
+SynthID on 1600x1600 gpt-image and that removal was resolution-dependent. That
+was an **artifact of the text-protection bug** (issue #14): those tests ran a
+build where `protect_text` was ON by default, and the high-resolution text
+re-scrub re-introduced SynthID in the dense-text regions of the infographic
+images tested. Re-running the *same* 1600x1600 image on clean v0.8.6 (protect
+OFF) removes SynthID at **0.05**. The "large images resist removal" conclusion
+was false; the resistance was the protect-text shielding, now fixed (v0.8.5).
+
+**Open / not locally testable:**
+
+- **Native large Gemini (2816x1536, ~4.3 MP).** The Gemini floor of 0.15 was
+  measured on the *capped* (`--max-resolution 1536`) path, which is the
+  practical local route on Apple-Silicon (native 2816 OOMs / falls back to slow
+  CPU on a 32 GB M-series). Native large Gemini was not measured here; the
+  vendor and resolution effects would stack, so it plausibly needs >= 0.30 or a
+  discrete GPU. Confirm on a CUDA box if needed.
+- **Heavy JPEG compression** (quality < ~50-60): not oracle-tested; the DL
+  approach is more robust than DWT-DCT but Google acknowledges limits at
+  "extreme" manipulation.
 
 ### 2.3 Removal attacks and forensic detectability
 
@@ -331,15 +353,17 @@ empirically from oracle tests:
 
 - **Before May 2026 (Gemini)**: strength 0.05 removed the watermark
 - **May 2026 (Gemini)**: strength 0.05 insufficient; 0.10 required
-- **Current (Gemini, June 2026)**: strength 0.10 insufficient for fresh images;
-  0.30 verified clean (Gemini app oracle, n=3, A100 GPU, native resolution)
-- **Current (OpenAI gpt-image 1600x1600, June 2026)**: strength 0.30 still
-  detected by openai.com/verify (issue #14, user qw1212ss report)
+- **Current (Gemini, June 2026)**: on the capped 1536 path, 0.05 and 0.10 do
+  NOT clear; 0.15 clears (n=4, Gemini app oracle). See section 2.2.
+- **OpenAI (June 2026)**: clears at 0.05 across 1024-1600 (n=4, clean v0.8.6).
+  The earlier "0.30 still detected on 1600x1600" report (issue #14) was the
+  text-protection bug, not a hardening of the watermark -- see the correction in
+  section 2.2.
 
-The progression suggests Google has progressively hardened the watermark -- the
-embedding signal strength or spatial distribution has increased across model
-generations. No Google announcement confirms this; the observation is purely
-empirical from oracle tests.
+Google has hardened SynthID relative to OpenAI's (vendor gap measured at ~3x
+strength), but the year-over-year "0.05 -> 0.10 -> 0.30" progression above
+conflates a real hardening trend with the now-debunked protect-text artifact;
+treat only the section 2.2 controlled numbers as authoritative.
 
 ---
 
@@ -373,16 +397,23 @@ watermark removal completeness, and always verify the result with the oracle.
 
 ### 5.2 Strength setting
 
-There is no single permanent correct strength. The default 0.30 was set based
-on the June 2026 oracle study (Gemini, n=3). Known gaps:
+There is no single permanent correct strength, but the controlled June 2026
+study (section 2.2) gives empirical floors:
 
-- **OpenAI gpt-image at 1600x1600**: 0.30 does not clear it (oracle-verified,
-  June 2026). 0.35 and 0.40 untested with oracle. 0.40 visibly corrupts text.
-- **Resolution matters**: the same strength that clears a 376x429 image fails
-  at 1600x1600 (qw1212ss observation, issue #14, multiple images)
+- **OpenAI**: 0.05 clears across 1024-1600 (n=4). 0.30 is large overkill here.
+- **Google (capped 1536)**: 0.15 (n=4); 0.05 and 0.10 do not clear.
+- **Google native 2816**: not locally measured; likely needs >= 0.30 (vendor +
+  resolution stack). Use a GPU or `--max-resolution 1536`.
 
-If the watermark survives at 0.30, the correct guidance is to try 0.35 then
-0.40, using the lowest value that reads clean on the vendor oracle.
+The default is **vendor-adaptive** (`watermark_profiles.resolve_strength` +
+`vendor_for_strength`): the tool reads the C2PA issuer on the original input and
+picks `OPENAI_STRENGTH` 0.10 / `GEMINI_STRENGTH` 0.15 / `UNKNOWN_STRENGTH` 0.15.
+This uses the vendor signal we DO have locally (the C2PA SynthID proxy) to avoid
+the overkill of a single high default on OpenAI images, without needing a local
+pixel detector. An explicit `--strength` always wins. If the watermark still
+survives (e.g. a large native Gemini beyond the capped-1536 validation), raise
+toward 0.30 then 0.35-0.40 (0.40 visibly corrupts dense text), using the lowest
+value that reads clean on the oracle.
 
 ### 5.3 Test methodology
 

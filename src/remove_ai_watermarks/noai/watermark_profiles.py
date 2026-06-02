@@ -5,28 +5,41 @@ Pure configuration and lookup functions with no ML dependencies.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
 DEFAULT_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 CTRLREGEN_MODEL_ID = "yepengliu/ctrlregen"
 
-# Single default denoising strength for the SDXL img2img scrub, overridable from
-# the CLI (`--strength`). Raised 0.10 -> 0.30 after an oracle-verified GPU strength
-# study (2026-05-31, Modal A100, native res, Gemini-app "Verify with SynthID", n=3
-# FRESH Gemini images + protect_text/faces OFF): the CURRENT Google SynthID survives
-# 0.10/0.15/0.2 and is only REMOVED at 0.3 (0.3 is the threshold; 0.2 still present).
-# This supersedes the earlier n=1 "0.10 removes it" note, which is now stale -- Google
-# has hardened SynthID and the threshold has climbed 0.05 -> 0.10 -> ~0.3 over time, so
-# treat this as a moving target and re-test against fresh Gemini output periodically.
-# Cost of 0.3: SSIM ~0.97 vs original (modest), but fine/dense typography softens, and
-# it is OVERKILL for non-SynthID sources (OpenAI/ChatGPT carry C2PA, not Google SynthID
-# -- 0.10 is plenty there). protect_text is RECOMMENDED ON for SynthID removal (A/B
-# verified 2026-05-31): SynthID is GLOBAL, so 0.3 clears it whether protection is on or
-# off, and protection salvages medium-text fidelity (~3x runtime); only the very finest
-# text still softens at 0.3. (An earlier comment claimed protect_text shields the
-# watermark -- that was wrong, it mistook the 0.10 strength failure for a protection
-# effect.) The only true tension is the finest typography softening at this aggressive
-# strength. (Fixed LOW/MEDIUM/HIGH presets were removed -- the one knob is this default
-# plus the per-call override.)
-DEFAULT_STRENGTH = 0.30
+# Vendor-adaptive default denoising strength for the SDXL img2img scrub, overridable
+# from the CLI (`--strength`). The right strength depends on which vendor's SynthID is
+# present, detected from the C2PA issuer (metadata.synthid_source). Oracle-verified
+# controlled study (2026-06-01, clean v0.8.6 with protect_text/faces OFF, per-image
+# openai.com/verify or Gemini-app verdict; see docs/synthid.md section 2.2):
+#   - OpenAI gpt-image: removed at 0.05 across 1024-1600 (n=4), resolution-independent.
+#     OPENAI_STRENGTH 0.10 = the 0.05 floor plus a 2x margin (keeps quality high).
+#   - Google Gemini: removed at 0.15 on the capped-1536 path (n=4); 0.05/0.10 do NOT
+#     clear. GEMINI_STRENGTH 0.15. CAVEAT: 0.15 was validated only on
+#     `--max-resolution 1536`; native 2816 (the default path) was not locally
+#     measurable (OOM on Apple Silicon) and may need more -- pending GPU validation on
+#     the raiw.cc backend. If a native large Gemini still verifies positive at 0.15,
+#     raise `--strength`.
+#   - Unknown vendor (metadata stripped, or non-OpenAI/Google C2PA): UNKNOWN_STRENGTH
+#     0.15, the safe middle that clears both vendors at the tested resolutions.
+# The dominant factor is VENDOR, not resolution: Google's SynthID is ~3x more robust
+# than OpenAI's. The earlier single 0.30 default (and the "resolution dependence" lore)
+# came from contaminated tests run with protect_text ON -- see docs/synthid.md 2.2.
+OPENAI_STRENGTH = 0.10
+GEMINI_STRENGTH = 0.15
+UNKNOWN_STRENGTH = 0.15
+# Backwards-compatible alias: the vendor-unknown default (what a caller gets without a
+# detected vendor). Kept as DEFAULT_STRENGTH for existing references.
+DEFAULT_STRENGTH = UNKNOWN_STRENGTH
+
+# Detected-vendor -> default strength. Vendor strings come from `vendor_for_strength`.
+_VENDOR_STRENGTH = {"openai": OPENAI_STRENGTH, "google": GEMINI_STRENGTH}
 
 # CtrlRegen removes watermarks by regenerating from (near) clean Gaussian noise,
 # NOT by the light-touch partial-noise img2img the SDXL default uses. The research
@@ -52,18 +65,45 @@ DEFAULT_STRENGTH = 0.30
 CTRLREGEN_DEFAULT_STRENGTH = 1.0
 
 
-def resolve_strength(strength: float | None, profile: str) -> float:
-    """Resolve the denoising strength, applying the profile-specific default when unset.
+def resolve_strength(strength: float | None, profile: str, vendor: str | None = None) -> float:
+    """Resolve the denoising strength, applying the profile/vendor default when unset.
 
-    ``None`` means "the user did not pass ``--strength``": the SDXL default profile
-    resolves to ``DEFAULT_STRENGTH`` (the SynthID-removal default, ~0.3), while
-    ``ctrlregen`` resolves to ``CTRLREGEN_DEFAULT_STRENGTH`` (clean-noise regeneration).
-    An explicit value always wins. Shared by the CLI (for display) and the engine (for
-    execution) so the two never disagree.
+    ``None`` means "the user did not pass ``--strength``". ``ctrlregen`` resolves to
+    ``CTRLREGEN_DEFAULT_STRENGTH`` (clean-noise regeneration). The SDXL default profile
+    resolves **vendor-adaptively**: ``vendor`` (``"openai"`` / ``"google"`` / None, from
+    ``vendor_for_strength``) selects ``OPENAI_STRENGTH`` / ``GEMINI_STRENGTH`` /
+    ``UNKNOWN_STRENGTH``. An explicit value always wins (including ``0.0`` -- the check is
+    ``is None``, not falsiness). Shared by the CLI (for display) and the engine (for
+    execution) so the two never disagree -- both must pass the SAME ``vendor``.
     """
     if strength is not None:
         return strength
-    return CTRLREGEN_DEFAULT_STRENGTH if profile == "ctrlregen" else DEFAULT_STRENGTH
+    if profile == "ctrlregen":
+        return CTRLREGEN_DEFAULT_STRENGTH
+    return _VENDOR_STRENGTH.get(vendor or "", UNKNOWN_STRENGTH)
+
+
+def vendor_for_strength(image_path: Path) -> Literal["openai", "google"] | None:
+    """Detect the SynthID vendor for strength selection: ``"openai"`` / ``"google"`` / None.
+
+    Reads the C2PA SynthID proxy (``metadata.synthid_source``) on the ORIGINAL input,
+    so it must run before any pass that strips metadata. When both issuers appear (a
+    rare multi-sign anomaly) Google wins -- the more-robust watermark -> safer (higher)
+    strength. Returns None when metadata is stripped or the issuer is neither vendor,
+    which maps to ``UNKNOWN_STRENGTH``. Lazy-imports ``metadata`` to keep this module
+    dependency-light.
+    """
+    try:
+        from remove_ai_watermarks.metadata import synthid_source
+
+        src = (synthid_source(image_path) or "").lower()
+    except Exception:  # metadata unreadable -> treat as unknown vendor
+        return None
+    if "google" in src:
+        return "google"
+    if "openai" in src:
+        return "openai"
+    return None
 
 
 def get_model_id_for_profile(profile: str) -> str:

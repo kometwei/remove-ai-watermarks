@@ -447,13 +447,15 @@ class WatermarkRemover:
         guidance_scale: float | None = None,
         seed: int | None = None,
         protect_text: bool = True,
+        vendor: str | None = None,
     ) -> Path:
         """Remove watermark from an image using regeneration attack.
 
         Args:
             image_path: Path to the watermarked image.
             output_path: Path for the cleaned image. If None, modifies in place.
-            strength: Denoising strength (0.0-1.0).
+            strength: Denoising strength (0.0-1.0). None -> the vendor-adaptive
+                default (see ``vendor``).
             num_inference_steps: Number of denoising steps.
             guidance_scale: Classifier-free guidance scale.
             seed: Random seed for reproducibility.
@@ -461,6 +463,11 @@ class WatermarkRemover:
                 Diffusion when any are found (SDXL default profile only). On by
                 default; the detector decides per image, and text-free inputs run
                 the standard pass at no extra cost.
+            vendor: SynthID vendor (``"openai"`` / ``"google"`` / None) used to pick the
+                default strength when ``strength`` is None. Detect it from the ORIGINAL
+                input with ``watermark_profiles.vendor_for_strength`` before processing
+                strips the metadata; the caller passes it down so display and execution
+                agree.
 
         Returns:
             Path to the cleaned image.
@@ -475,7 +482,7 @@ class WatermarkRemover:
         if output_path is None:
             output_path = image_path
 
-        strength = resolve_strength(strength, self.model_profile)
+        strength = resolve_strength(strength, self.model_profile, vendor)
 
         if not 0.0 <= strength <= 1.0:
             raise ValueError(f"Strength must be between 0.0 and 1.0, got {strength}")
@@ -902,12 +909,16 @@ def remove_watermark(
 ) -> Path:
     """Convenience function to remove watermark from an image.
 
-    ``strength=None`` lets the profile pick its default (0.10 for SDXL, clean-noise
-    1.0 for ctrlregen); pass a value to override.
+    ``strength=None`` lets the profile pick its default: vendor-adaptive for SDXL
+    (0.10 OpenAI / 0.15 Google / 0.15 unknown, from the C2PA SynthID proxy on the
+    input), clean-noise 1.0 for ctrlregen. Pass a value to override.
     """
+    from remove_ai_watermarks.noai.watermark_profiles import vendor_for_strength
+
     remover = WatermarkRemover(model_id=model_id, device=device, hf_token=hf_token)
     return remover.remove_watermark(
         image_path=image_path,
         output_path=output_path,
         strength=strength,
+        vendor=vendor_for_strength(image_path),
     )

@@ -6,6 +6,7 @@ code paths work correctly on CPU, MPS (macOS), and CUDA (Linux/Windows).
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,9 @@ from remove_ai_watermarks.noai.utils import get_image_format, is_supported_forma
 from remove_ai_watermarks.noai.watermark_profiles import (
     CTRLREGEN_DEFAULT_STRENGTH,
     DEFAULT_STRENGTH,
+    GEMINI_STRENGTH,
+    OPENAI_STRENGTH,
+    UNKNOWN_STRENGTH,
     detect_model_profile,
     get_model_id_for_profile,
     resolve_strength,
@@ -125,19 +129,31 @@ class TestModelProfiles:
 
 
 class TestResolveStrength:
-    """resolve_strength applies the profile default only when strength is unset."""
+    """resolve_strength applies the profile/vendor default only when strength is unset."""
 
-    def test_none_default_profile_uses_sdxl_default(self):
-        assert resolve_strength(None, "default") == DEFAULT_STRENGTH
+    def test_none_default_profile_is_vendor_adaptive(self):
+        # No vendor -> unknown default; OpenAI lower, Google == unknown.
+        assert resolve_strength(None, "default") == UNKNOWN_STRENGTH
+        assert resolve_strength(None, "default", "openai") == OPENAI_STRENGTH
+        assert resolve_strength(None, "default", "google") == GEMINI_STRENGTH
+        assert resolve_strength(None, "default", None) == UNKNOWN_STRENGTH
+        # An unrecognized vendor string falls through to the unknown default.
+        assert resolve_strength(None, "default", "adobe") == UNKNOWN_STRENGTH
+
+    def test_default_strength_alias_is_unknown_vendor_value(self):
+        assert DEFAULT_STRENGTH == UNKNOWN_STRENGTH
+        assert OPENAI_STRENGTH < UNKNOWN_STRENGTH
 
     def test_none_ctrlregen_uses_clean_noise_default(self):
-        # ctrlregen must NOT inherit the SDXL DEFAULT_STRENGTH (that makes it a no-op);
-        # clean-noise regeneration is the lever against robust marks.
+        # ctrlregen must NOT inherit the SDXL vendor defaults (that makes it a no-op);
+        # clean-noise regeneration is the lever against robust marks. Vendor is ignored.
         assert resolve_strength(None, "ctrlregen") == CTRLREGEN_DEFAULT_STRENGTH
+        assert resolve_strength(None, "ctrlregen", "openai") == CTRLREGEN_DEFAULT_STRENGTH
         assert CTRLREGEN_DEFAULT_STRENGTH > DEFAULT_STRENGTH
 
-    def test_explicit_value_overrides_both_profiles(self):
+    def test_explicit_value_overrides_profile_and_vendor(self):
         assert resolve_strength(0.3, "default") == 0.3
+        assert resolve_strength(0.3, "default", "openai") == 0.3
         assert resolve_strength(0.3, "ctrlregen") == 0.3
 
     def test_explicit_zero_is_respected_not_treated_as_unset(self):
@@ -145,6 +161,46 @@ class TestResolveStrength:
         # (the old `strength or DEFAULT` bug would have). Range validation lives in
         # remove_watermark, not here.
         assert resolve_strength(0.0, "ctrlregen") == 0.0
+        assert resolve_strength(0.0, "default", "google") == 0.0
+
+
+class TestVendorForStrength:
+    """vendor_for_strength normalizes the C2PA SynthID proxy to openai/google/None."""
+
+    @staticmethod
+    def _patch(value):
+        return patch("remove_ai_watermarks.metadata.synthid_source", return_value=value)
+
+    def test_openai(self):
+        from remove_ai_watermarks.noai.watermark_profiles import vendor_for_strength
+
+        with self._patch("OpenAI"):
+            assert vendor_for_strength(Path("x.png")) == "openai"
+
+    def test_google(self):
+        from remove_ai_watermarks.noai.watermark_profiles import vendor_for_strength
+
+        with self._patch("Google"):
+            assert vendor_for_strength(Path("x.png")) == "google"
+
+    def test_both_issuers_google_wins(self):
+        # The more-robust watermark wins -> safer (higher) strength.
+        from remove_ai_watermarks.noai.watermark_profiles import vendor_for_strength
+
+        with self._patch("OpenAI, Google"):
+            assert vendor_for_strength(Path("x.png")) == "google"
+
+    def test_none_when_no_synthid_source(self):
+        from remove_ai_watermarks.noai.watermark_profiles import vendor_for_strength
+
+        with self._patch(None):
+            assert vendor_for_strength(Path("x.png")) is None
+
+    def test_unreadable_metadata_is_none(self):
+        from remove_ai_watermarks.noai.watermark_profiles import vendor_for_strength
+
+        with patch("remove_ai_watermarks.metadata.synthid_source", side_effect=OSError):
+            assert vendor_for_strength(Path("x.png")) is None
 
 
 # ── Format utilities ────────────────────────────────────────────────
