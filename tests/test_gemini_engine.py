@@ -346,6 +346,85 @@ class TestUnderSubtractionGain:
         assert abs(float(footprint.mean()) - 80.0) < 20.0
 
 
+class TestSparkleFalsePositiveGate:
+    """False-positive gate: a low-confidence shape match whose core is NOT brighter
+    than its surroundings (ornate/flat content, not a white sparkle overlay) is
+    demoted below the detection threshold. Real sparkles escape via high confidence
+    or a bright core-ring margin.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup_engine(self):
+        self.engine = GeminiEngine()
+
+    def _composite_sparkle(self, bg_value: int, alpha_scale: float, size: int = 1400):
+        img = np.full((size, size, 3), bg_value, dtype=np.float32)
+        config = get_watermark_config(size, size)
+        x, y = config.get_position(size, size)
+        alpha = self.engine.get_alpha_map(WatermarkSize.LARGE)
+        ah, aw = alpha.shape[:2]
+        a = np.clip(alpha * alpha_scale, 0.0, 1.0)[:, :, None]
+        roi = img[y : y + ah, x : x + aw]
+        img[y : y + ah, x : x + aw] = a * 255.0 + (1.0 - a) * roi
+        return np.clip(img, 0, 255).astype(np.uint8), (x, y, aw, ah)
+
+    def test_bright_core_has_high_margin(self):
+        image, (x, y, w, _h) = self._composite_sparkle(bg_value=60, alpha_scale=1.0)
+        margin = self.engine._core_ring_margin(image, self.engine.get_interpolated_alpha(w), (x, y))
+        assert margin is not None
+        assert margin > self.engine._SPARKLE_FP_MARGIN
+
+    def test_flat_region_has_low_margin(self):
+        """A uniform region (no white sparkle) has ~zero core-ring margin."""
+        flat = np.full((1400, 1400, 3), 128, dtype=np.uint8)
+        config = get_watermark_config(1400, 1400)
+        pos = config.get_position(1400, 1400)
+        alpha = self.engine.get_interpolated_alpha(96)
+        margin = self.engine._core_ring_margin(flat, alpha, pos)
+        assert margin is not None
+        assert abs(margin) < self.engine._SPARKLE_FP_MARGIN
+
+    def test_strong_sparkle_not_demoted(self):
+        image, _ = self._composite_sparkle(bg_value=60, alpha_scale=1.0)
+        det = self.engine.detect_watermark(image)
+        assert det.detected
+        assert det.confidence >= 0.5
+
+    def test_strong_sparkle_on_white_kept(self):
+        """A real sparkle on a near-white background has a LOW core-ring margin (the
+        white overlay barely lifts white) but a HIGH NCC confidence, so the gate must
+        NOT demote it -- high confidence is the escape hatch."""
+        image, (x, y, w, _h) = self._composite_sparkle(bg_value=251, alpha_scale=1.0)
+        margin = self.engine._core_ring_margin(image, self.engine.get_interpolated_alpha(w), (x, y))
+        assert margin is not None
+        assert margin < self.engine._SPARKLE_FP_MARGIN  # low margin
+        det = self.engine.detect_watermark(image)
+        assert det.detected
+        assert det.confidence >= 0.65  # but kept via high confidence
+
+    def test_low_margin_blurred_blob_is_demoted(self):
+        """A heavily-blurred faint near-white blob NCC-matches the sparkle shape (the
+        stage scores fuse above the 0.5 promote bar) but has no bright core (low
+        margin), so the gate demotes the returned confidence below it -- the content
+        false-positive case."""
+        size = 1400
+        config = get_watermark_config(size, size)
+        x, y = config.get_position(size, size)
+        alpha = self.engine.get_alpha_map(WatermarkSize.LARGE)
+        ah, aw = alpha.shape[:2]
+        img = np.full((size, size, 3), 247, dtype=np.float32)
+        a = np.clip(alpha * 0.5, 0.0, 1.0)[:, :, None]
+        img[y : y + ah, x : x + aw] = a * 255.0 + (1.0 - a) * img[y : y + ah, x : x + aw]
+        img = cv2.GaussianBlur(np.clip(img, 0, 255).astype(np.uint8), (31, 31), 0)
+        det = self.engine.detect_watermark(img)
+        # The raw stage scores fuse above 0.5 (would be promoted)...
+        pre = det.spatial_score * 0.5 + det.gradient_score * 0.3 + det.variance_score * 0.2
+        assert pre > 0.5
+        # ...but the no-bright-core gate caps the returned confidence below the bar.
+        assert det.confidence < 0.5
+        assert not det.detected
+
+
 class TestCornerPromotion:
     """Issue #36: a small sparkle in the corner must not be lost to a larger decoy.
 

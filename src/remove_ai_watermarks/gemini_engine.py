@@ -157,6 +157,20 @@ class GeminiEngine:
     # the pre-fix output. Under-removed marks estimate >= 1.26, well clear of the band.
     _ALPHA_GAIN_DEADBAND = 1.05
 
+    # Sparkle false-positive gate. A real Gemini sparkle is a bright WHITE overlay,
+    # so its core sits above the local background; a shape-only NCC match on ornate
+    # or flat content (text, banners, hatching) can score >0.5 without that lift.
+    # Demote a detection that is BOTH low-confidence AND low core-ring brightness
+    # margin -- the joint signature of a content false positive (verified on the
+    # spaces corpus: of 16 demoted, 13 carried no AI metadata and the 3 AI-meta ones
+    # were visually FPs / a near-invisible white-on-white sparkle whose AI verdict is
+    # held by metadata anyway). Real sparkles escape via EITHER high confidence
+    # (white-bg sparkles score >=0.79 despite a low margin) OR high margin (dark/mid
+    # backgrounds, incl. the #36 faint-corner case, lift well clear), so both must
+    # fail to demote.
+    _SPARKLE_FP_CONF = 0.65
+    _SPARKLE_FP_MARGIN = 5.0
+
     # Corner promotion (issue #36): the size weight that suppresses tiny-patch
     # false positives also buries a small, near-perfect sparkle when a larger,
     # mediocre match sits elsewhere (e.g. a bright collar in a portrait). A small
@@ -363,6 +377,20 @@ class GeminiEngine:
 
         # ── Fusion ───────────────────────────────────────────────────
         confidence = result.spatial_score * 0.50 + result.gradient_score * 0.30 + var_score * 0.20
+
+        # False-positive gate: a low-confidence shape match whose core is NOT brighter
+        # than its surroundings is a content false positive, not a white sparkle overlay.
+        if confidence < self._SPARKLE_FP_CONF:
+            margin = self._core_ring_margin(image, self.get_interpolated_alpha(best_scale), (pos_x, pos_y))
+            if margin is not None and margin < self._SPARKLE_FP_MARGIN:
+                logger.debug(
+                    "Sparkle FP gate: conf=%.3f, core-ring margin=%.1f < %.1f; demoting.",
+                    confidence,
+                    margin,
+                    self._SPARKLE_FP_MARGIN,
+                )
+                confidence = min(confidence, 0.30)
+
         result.confidence = float(max(0.0, min(1.0, confidence)))
         result.detected = result.confidence >= 0.35
 
@@ -548,6 +576,58 @@ class GeminiEngine:
         alpha_roi = alpha_map[ay1 : ay1 + (y2 - y1), ax1 : ax1 + (x2 - x1)]
         return alpha_roi, (y1, y2, x1, x2)
 
+    def _core_and_bg(
+        self,
+        image: NDArray[Any],
+        alpha_map: NDArray[Any],
+        position: tuple[int, int],
+    ) -> tuple[float, float, float] | None:
+        """Return ``(core_obs, bg, a_cap)`` for the placed sparkle, or None.
+
+        ``core_obs`` is the bright-core brightness (75th pct over the high-alpha
+        core), ``bg`` the local background ring median, ``a_cap`` the captured peak
+        alpha. Shared by the alpha-gain estimate and the false-positive margin gate.
+        None when the footprint or the background ring cannot be sampled.
+        """
+        placed = self._footprint_indices(alpha_map, position, image.shape)
+        if placed is None:
+            return None
+        alpha_roi, (y1, y2, x1, x2) = placed
+        a_cap = float(alpha_roi.max())
+        if a_cap < 0.2:
+            return None
+        gray = image.astype(np.float32).mean(axis=2)
+        core = alpha_roi >= a_cap * self._ALPHA_GAIN_CORE_FRAC
+        if not bool(core.any()):
+            return None
+        core_obs = float(np.percentile(gray[y1:y2, x1:x2][core], 75))
+        # Local background = a ring just outside the footprint box.
+        ih, iw = image.shape[:2]
+        pad = int((x2 - x1) * 0.7)
+        ry1, ry2 = max(0, y1 - pad), min(ih, y2 + pad)
+        rx1, rx2 = max(0, x1 - pad), min(iw, x2 + pad)
+        ring = gray[ry1:ry2, rx1:rx2]
+        ring_mask = np.ones(ring.shape, dtype=bool)
+        ring_mask[y1 - ry1 : y2 - ry1, x1 - rx1 : x2 - rx1] = False
+        if int(ring_mask.sum()) < 10:
+            return None
+        return core_obs, float(np.median(ring[ring_mask])), a_cap
+
+    def _core_ring_margin(
+        self,
+        image: NDArray[Any],
+        alpha_map: NDArray[Any],
+        position: tuple[int, int],
+    ) -> float | None:
+        """Bright-core brightness minus the local background ring (gray levels).
+
+        A real white sparkle overlay lifts its core above the surroundings; a
+        shape-only NCC false positive on ornate/flat content does not. None when the
+        background ring cannot be sampled.
+        """
+        cb = self._core_and_bg(image, alpha_map, position)
+        return None if cb is None else cb[0] - cb[1]
+
     def _estimate_alpha_gain(
         self,
         image: NDArray[Any],
@@ -563,29 +643,10 @@ class GeminiEngine:
         so it only ever STRENGTHENS removal (1.0 = no change on a matching sparkle).
         Returns 1.0 when the background cannot be estimated reliably.
         """
-        placed = self._footprint_indices(alpha_map, position, image.shape)
-        if placed is None:
+        cb = self._core_and_bg(image, alpha_map, position)
+        if cb is None:
             return 1.0
-        alpha_roi, (y1, y2, x1, x2) = placed
-        a_cap = float(alpha_roi.max())
-        if a_cap < 0.2:
-            return 1.0
-        gray = image.astype(np.float32).mean(axis=2)
-        core = alpha_roi >= a_cap * self._ALPHA_GAIN_CORE_FRAC
-        if not bool(core.any()):
-            return 1.0
-        core_obs = float(np.percentile(gray[y1:y2, x1:x2][core], 75))
-        # Local background = a ring just outside the footprint box.
-        ih, iw = image.shape[:2]
-        pad = int((x2 - x1) * 0.7)
-        ry1, ry2 = max(0, y1 - pad), min(ih, y2 + pad)
-        rx1, rx2 = max(0, x1 - pad), min(iw, x2 + pad)
-        ring = gray[ry1:ry2, rx1:rx2]
-        ring_mask = np.ones(ring.shape, dtype=bool)
-        ring_mask[y1 - ry1 : y2 - ry1, x1 - rx1 : x2 - rx1] = False
-        if int(ring_mask.sum()) < 10:
-            return 1.0
-        bg = float(np.median(ring[ring_mask]))
+        core_obs, bg, a_cap = cb
         if 255.0 - bg < 5.0:
             return 1.0
         a_eff = float(np.clip((core_obs - bg) / (255.0 - bg), 0.0, 0.99))
