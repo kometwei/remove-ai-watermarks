@@ -8,7 +8,7 @@ host (image work there OOM-crashes the container).
 
 Routing is **quality-priority**: ControlNet (text/face-structure preservation) is the
 default; it is only skipped for a clearly structure-less image (no face, no text,
-near-zero edges), where plain SDXL is cheaper and just as good. GFPGAN face
+near-zero edges), where plain SDXL is cheaper and just as good. PhotoMaker face
 restoration is enabled when a face is present. When a smoothing pass (controlnet or
 face restore) ran, the **adaptive polish** (``humanizer.adaptive_polish``) restores
 the input's detail level -- a capped unsharp + edge-masked grain targeting the input's

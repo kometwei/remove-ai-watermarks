@@ -236,32 +236,21 @@ def _warn_if_esrgan_unavailable(upscaler: str) -> None:
 
 
 def _restore_faces_options(f: Any) -> Any:
-    """Attach the shared face-restoration flags to an invisible-pipeline command."""
-    restore_flag = click.option(
+    """Attach the face-restoration flag to an invisible-pipeline command.
+
+    PhotoMaker-V2 is the only restoration method shipped (the prior GFPGAN path was
+    oracle-confirmed to re-introduce SynthID by partial pixel blending and has been
+    removed). PhotoMaker carries identity in a SynthID-invariant OpenCLIP embedding
+    and regenerates fresh face pixels conditioned on it -- see
+    ``docs/synthid-robust-identity-research.md``.
+    """
+    return click.option(
         "--restore-faces/--no-restore-faces",
         default=False,
-        help="EXPERIMENTAL, opt-in. Restore face identity with a post-pass when faces are "
-        "present; off by default, auto-skips when no face is detected or the chosen extra "
-        "is absent.",
-    )
-    method_flag = click.option(
-        "--restore-faces-method",
-        type=click.Choice(["gfpgan", "photomaker"]),
-        default="gfpgan",
-        help="Face-restore mechanism: 'gfpgan' (cheap, needs 'restore' extra, BUT runs on "
-        "the watermarked original and re-introduces SynthID) or 'photomaker' (PhotoMaker-V2, "
-        "needs the 'photomaker' extra; carries identity via a SynthID-invariant OpenCLIP "
-        "embedding so the regenerated face pixels are watermark-free). Default: gfpgan.",
-    )
-    weight_flag = click.option(
-        "--restore-faces-weight",
-        type=float,
-        default=0.5,
-        help="GFPGAN fidelity weight (0-1); lower = more GAN regeneration (cleaner "
-        "watermark scrub), higher = closer to the input. Ignored when "
-        "--restore-faces-method=photomaker.",
-    )
-    return restore_flag(method_flag(weight_flag(f)))
+        help="EXPERIMENTAL, opt-in. Restore face identity with the PhotoMaker-V2 post-pass "
+        "when faces are present (needs the 'photomaker' extra); off by default, auto-skips "
+        "when no face is detected or the extra is absent.",
+    )(f)
 
 
 def _watermark_region(det: DetectionResult, width: int, height: int) -> tuple[int, int, int, int]:
@@ -612,8 +601,6 @@ def cmd_invisible(
     min_resolution: int,
     controlnet_scale: float,
     restore_faces: bool,
-    restore_faces_weight: float,
-    restore_faces_method: str,
     upscaler: str,
     auto: bool,
     adaptive_polish: bool,
@@ -676,8 +663,6 @@ def cmd_invisible(
         upscaler=upscaler,
         vendor=vendor,
         restore_faces=restore_faces,
-        restore_faces_weight=restore_faces_weight,
-        restore_faces_method=restore_faces_method,
     )
     elapsed = time.monotonic() - t0
 
@@ -879,8 +864,6 @@ def cmd_all(
     min_resolution: int,
     controlnet_scale: float,
     restore_faces: bool,
-    restore_faces_weight: float,
-    restore_faces_method: str,
     upscaler: str,
     auto: bool,
     adaptive_polish: bool,
@@ -989,8 +972,6 @@ def cmd_all(
                 upscaler=upscaler,
                 vendor=vendor,
                 restore_faces=restore_faces,
-                restore_faces_weight=restore_faces_weight,
-                restore_faces_method=restore_faces_method,
             )
             console.print("    Invisible watermark removed")
 
@@ -1046,8 +1027,6 @@ def _process_batch_image(
     max_resolution: int = 0,
     min_resolution: int = 1024,
     restore_faces: bool = False,
-    restore_faces_weight: float = 0.5,
-    restore_faces_method: str = "gfpgan",
     controlnet_scale: float = 1.0,
     upscaler: str = "lanczos",
     auto: bool = False,
@@ -1126,8 +1105,6 @@ def _process_batch_image(
                 min_resolution=min_resolution,
                 upscaler=upscaler,
                 restore_faces=restore_faces,
-                restore_faces_weight=restore_faces_weight,
-                restore_faces_method=restore_faces_method,
                 # Detect the vendor from the pristine original (`img_path`), not the
                 # visible-processed `out_path` whose C2PA is already gone.
                 vendor=vendor_for_strength(img_path),
@@ -1210,8 +1187,6 @@ def cmd_batch(
     max_resolution: int,
     min_resolution: int,
     restore_faces: bool,
-    restore_faces_weight: float,
-    restore_faces_method: str,
     controlnet_scale: float,
     upscaler: str,
     auto: bool,
@@ -1271,8 +1246,6 @@ def cmd_batch(
                     max_resolution=max_resolution,
                     min_resolution=min_resolution,
                     restore_faces=restore_faces,
-                    restore_faces_weight=restore_faces_weight,
-                    restore_faces_method=restore_faces_method,
                     controlnet_scale=controlnet_scale,
                     upscaler=upscaler,
                     auto=auto,

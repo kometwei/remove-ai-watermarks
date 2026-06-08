@@ -568,8 +568,9 @@ table.
 **Net for raiw.cc:** (1) controlnet needs a higher, per-vendor strength than
 `default` -- CERTIFIED OpenAI 0.20 / Gemini 0.30 (above); add a controlnet-specific
 schedule to `resolve_strength`, do not reuse the default ladder; (2) the
-`--restore-faces` pass can re-add SynthID and must be reworked (restore on the
-cleaned image / lower weight / off) before it is safe in a removal pipeline; (3)
+`--restore-faces` pass is now SynthID-safe by construction (the GFPGAN-on-original
+path that re-added SynthID was removed 2026-06-04; the shipped restore is
+PhotoMaker-V2, identity-as-embedding, see `synthid-robust-identity-research.md`); (3)
 removal near threshold is seed-non-deterministic -> FIX the prod seed (kills the
 coin-flip; ship a deterministic certified config).
 
