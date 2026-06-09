@@ -76,12 +76,25 @@ _SDXL_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 # `img`, which PhotoMaker replaces with the ID embedding at inference. Keeping it
 # scene-neutral (no extra style words) maximises identity transfer from the embed and
 # minimises hallucinated background/lighting that would not match the cleaned scene.
-_PHOTOMAKER_PROMPT = "a portrait photo of a person img, natural lighting, sharp focus"
-_PHOTOMAKER_NEGATIVE = "blurry, lowres, deformed, distorted, watermark"
+# Prompt format follows the upstream V2 reference (inference_pmv2.py): the trigger
+# word ``img`` must immediately follow a class noun. SDXL is happiest at 1024 and
+# falls into low-res artefacts ("mosaic of tiny faces") at 512, so we render at
+# 1024 then downscale into the face bbox at composite time. Caught visually
+# 2026-06-04: at 512 V2 produced a collage of training-time faces; at 1024 with the
+# upstream-style descriptive prompt it produces a clean face.
+_PHOTOMAKER_PROMPT = (
+    "instagram photo, portrait photo of a person img, natural skin, soft lighting, "
+    "best quality, sharp focus"
+)
+_PHOTOMAKER_NEGATIVE = (
+    "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, "
+    "cartoons, sketch), open mouth, blurry, watermark"
+)
 
-# Square size used to feed PhotoMaker (must match a multiple of 64; 512 fits CPU/GPU
-# comfortably and gives the encoder enough pixels for a stable embedding).
-_PHOTOMAKER_FACE_SIZE = 512
+# SDXL native resolution; lower values send V2 into low-res mode and the output
+# becomes a collage of training-time faces. We render at 1024 then downscale into
+# the original face bbox at composite time.
+_PHOTOMAKER_FACE_SIZE = 1024
 
 _pipeline: Any | None = None
 _pipeline_lock = threading.Lock()
@@ -334,15 +347,11 @@ def restore_faces_photomaker(
         id_crop_rgb = cv2.cvtColor(id_crop_bgr, cv2.COLOR_BGR2RGB)
         id_image_pil = Image.fromarray(id_crop_rgb)
 
-        # Don't pass negative_prompt: the PhotoMaker pipeline manages its own CFG by
-        # concatenating [negative_prompt_embeds, prompt_embeds]; if we pass a custom
-        # negative the upstream code splits text_only vs id-injected branches and
-        # the resulting embed batch dims can mismatch (we saw
-        # "Sizes of tensors must match except in dimension 1. Expected size 2 but got
-        # size 1" on a real run). The default empty negative is what the upstream
-        # gradio demo uses.
+        # Upstream V2 reference (inference_pmv2.py) passes negative_prompt; the
+        # batch-mismatch we hit earlier was on V1 only.
         out = pipeline(
             prompt=_PHOTOMAKER_PROMPT,
+            negative_prompt=_PHOTOMAKER_NEGATIVE,
             input_id_images=[id_image_pil],
             id_embeds=id_embeds,
             num_inference_steps=num_inference_steps,
