@@ -362,6 +362,7 @@ class TestAllCommand:
         with (
             patch("remove_ai_watermarks.cli.InvisibleEngine", mock_cls, create=True),
             patch("remove_ai_watermarks.invisible_engine.InvisibleEngine", mock_cls),
+            patch("remove_ai_watermarks.invisible_engine.is_available", return_value=True),
         ):
             result = runner.invoke(
                 main,
@@ -383,6 +384,7 @@ class TestAllCommand:
         with (
             patch("remove_ai_watermarks.cli.InvisibleEngine", mock_cls, create=True),
             patch("remove_ai_watermarks.invisible_engine.InvisibleEngine", mock_cls),
+            patch("remove_ai_watermarks.invisible_engine.is_available", return_value=True),
             patch("remove_ai_watermarks.watermark_registry.best_auto_mark", return_value=None) as mock_best,
         ):
             result = runner.invoke(main, ["all", str(sample_png), "-o", str(output)])
