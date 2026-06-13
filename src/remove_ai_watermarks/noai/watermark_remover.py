@@ -757,9 +757,9 @@ def remove_watermark(
 ) -> Path:
     """Convenience function to remove watermark from an image.
 
-    ``strength=None`` lets the profile pick its vendor-adaptive SDXL default
-    (0.10 OpenAI / 0.15 Google / 0.15 unknown, from the C2PA SynthID proxy on the
-    input). Pass a value to override.
+    ``strength=None`` lets the profile pick its vendor-adaptive default
+    (0.20 OpenAI / 0.30 Google / 0.30 unknown, from the C2PA SynthID proxy on the
+    input; same ladder for the controlnet and sdxl pipelines). Pass a value to override.
     """
     from remove_ai_watermarks.noai.watermark_profiles import vendor_for_strength
 
