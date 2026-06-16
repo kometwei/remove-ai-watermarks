@@ -35,6 +35,7 @@ const App = (() => {
     toggleMeta: $('#toggle-metadata'),
     toggleForce: $('#toggle-force'),
     btnProcess: $('#btn-process'),
+    btnBatchProcess: $('#btn-batch-process'),
     btnBatch: $('#btn-batch-download'),
     btnDownload: $('#btn-download'),
     emptyState: $('#empty-state'),
@@ -126,6 +127,8 @@ const App = (() => {
 
       const statusIcon = {
         pending: '<span class="status-icon pending">⏳</span>',
+        detected: '<span class="status-icon detected" title="Detected">🔍</span>',
+        ready: '<span class="status-icon ready" title="Ready">●</span>',
         processing: '<span class="status-icon processing">⏳</span>',
         done: '<span class="status-icon success">✓</span>',
         error: '<span class="status-icon error" title="Failed">!</span>',
@@ -248,12 +251,14 @@ const App = (() => {
       state.settings.method = e.target.value;
     });
 
-    el.toggleMeta.addEventListener('click', () => {
+    el.toggleMeta.addEventListener('click', (e) => {
+      e.preventDefault();
       state.settings.stripMetadata = !state.settings.stripMetadata;
       el.toggleMeta.classList.toggle('on', state.settings.stripMetadata);
     });
 
-    el.toggleForce.addEventListener('click', () => {
+    el.toggleForce.addEventListener('click', (e) => {
+      e.preventDefault();
       state.settings.force = !state.settings.force;
       el.toggleForce.classList.toggle('on', state.settings.force);
     });
@@ -312,6 +317,7 @@ const App = (() => {
   // ── Actions ──────────────────────────────────────────────
   function _bindActions() {
     el.btnProcess.addEventListener('click', _processActive);
+    el.btnBatchProcess.addEventListener('click', _processAll);
     el.btnBatch.addEventListener('click', _batchDownload);
     el.btnDownload.addEventListener('click', _downloadCurrent);
   }
@@ -324,6 +330,7 @@ const App = (() => {
     img.status = 'processing';
     _renderFileList();
     el.processingOverlay.style.display = '';
+    el.processingOverlay.querySelector('.overlay-text').textContent = '处理中...';
 
     try {
       const params = new URLSearchParams({
@@ -369,10 +376,69 @@ const App = (() => {
     const allDone = state.images.length > 0 && state.images.every((i) => i.status === 'done');
     el.btnBatch.classList.toggle('ready', allDone);
     el.btnBatch.disabled = !allDone;
+    // Enable batch process when there are unprocessed images
+    const hasPending = state.images.some(
+      (i) => i.status === 'pending' || i.status === 'ready' || i.status === 'detected'
+    );
+    el.btnBatchProcess.disabled = !hasPending;
   }
 
   function _batchDownload() {
     window.open('/api/download-all', '_blank');
+  }
+
+  async function _processAll() {
+    const pending = state.images.filter(
+      (i) => i.status === 'pending' || i.status === 'ready' || i.status === 'detected'
+    );
+    if (!pending.length) return;
+
+    el.btnBatchProcess.disabled = true;
+    el.btnProcess.disabled = true;
+    let done = 0;
+
+    for (const img of pending) {
+      img.status = 'processing';
+      _renderFileList();
+      el.processingOverlay.style.display = '';
+      el.processingOverlay.querySelector('.overlay-text').textContent =
+        `处理中... (${done + 1}/${pending.length})`;
+
+      try {
+        const params = new URLSearchParams({
+          mark: state.settings.mark,
+          method: state.settings.method,
+          strip_metadata: state.settings.stripMetadata,
+          force: state.settings.force,
+        });
+
+        const res = await fetch(`/api/process/${img.id}?${params}`, { method: 'POST' });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || 'Processing failed');
+        }
+
+        img.status = 'done';
+      } catch (err) {
+        img.status = 'error';
+        console.error(`Batch process error (${img.name}):`, err);
+      } finally {
+        el.processingOverlay.style.display = 'none';
+        done++;
+        _renderFileList();
+      }
+    }
+
+    _updateBatchButton();
+    // Select the first image to show results
+    if (state.images.length > 0) {
+      _selectImage(state.images[0].id);
+    }
+    const successCount = pending.filter((i) => i.status === 'done').length;
+    const failCount = pending.filter((i) => i.status === 'error').length;
+    let msg = `批量处理完成: ${successCount} 成功`;
+    if (failCount > 0) msg += `, ${failCount} 失败`;
+    alert(msg);
   }
 
   function _downloadCurrent() {

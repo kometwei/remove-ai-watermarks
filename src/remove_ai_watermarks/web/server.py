@@ -141,7 +141,11 @@ def create_app() -> FastAPI:
         html = _STATIC_DIR / "index.html"
         if not html.exists():
             raise HTTPException(404, "Frontend not found")
-        return FileResponse(str(html), media_type="text/html")
+        return FileResponse(
+            str(html),
+            media_type="text/html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     # ── Upload ────────────────────────────────────────────────────────
 
