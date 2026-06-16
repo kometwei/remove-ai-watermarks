@@ -98,6 +98,15 @@ _SPECS: dict[str, EngineSpec] = {
         native_width=1086,
         corner="bl",
     ),
+    "lenovo": EngineSpec(
+        "lenovo",
+        _ROOT / "data" / "lenovo_capture" / "captures",
+        "lenovo_black_1.jpg",  # black capture (mark on black, bottom-right)
+        "lenovo_black_1.jpg",  # same file; Lenovo uses black-only solve (no gray)
+        _ROOT / "src" / "remove_ai_watermarks" / "assets" / "lenovo_alpha.png",
+        native_width=2000,
+        corner="br",
+    ),
 }
 
 _CUBIC_BG_PAD = 30  # px of background margin around the mark for the cubic fit
@@ -226,6 +235,55 @@ def solve_alpha(spec: EngineSpec) -> NDArray[np.uint8]:
     return (np.clip(tight, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
+def solve_alpha_from_black(spec: EngineSpec) -> NDArray[np.uint8]:
+    """Solve the alpha map from a PURE-BLACK capture only.
+
+    Used when the only available capture is on a true black background (no gray
+    reference). On black, the watermark equation simplifies to
+    ``pixel = alpha * logo`` where ``logo = (255, 255, 255)`` (white overlay),
+    so ``alpha = max_channel / 255``. The max channel is used to minimize JPEG
+    compression artifacts across individual colour channels.
+    """
+    black = image_io.imread(str(spec.capture_dir / spec.black), cv2.IMREAD_COLOR)
+    if black is None:
+        raise FileNotFoundError(f"missing capture {spec.capture_dir / spec.black}")
+    black_f = black.astype(np.float32)
+    img_h, img_w = black_f.shape[:2]
+    mx0, mx1, my0, my1 = _locate_on_black(black_f, spec.corner)
+    pad = _CUBIC_BG_PAD
+    rx0, rx1 = max(0, mx0 - pad), min(img_w, mx1 + pad)
+    ry0, ry1 = max(0, my0 - pad), min(img_h, my1 + pad)
+    cb = black_f[ry0:ry1, rx0:rx1]
+    # Alpha from max channel (less affected by JPEG compression)
+    alpha = np.clip(cb.max(axis=2) / 255.0, 0.0, 1.0)
+    # Crop to glyph body + halo
+    body = (alpha > _GLYPH_BODY).astype(np.uint8)
+    bx, bex, by, bey = _union_bbox(body, "solved alpha has no glyph body -- check the black capture")
+    cx0 = max(0, bx - _HALO_PAD)
+    cy0 = max(0, by - _HALO_PAD)
+    cx1 = min(alpha.shape[1], bex + _HALO_PAD)
+    cy1 = min(alpha.shape[0], bey + _HALO_PAD)
+    tight = alpha[cy0:cy1, cx0:cx1]
+    aw, ah = tight.shape[1], tight.shape[0]
+    abs_x0, abs_y0 = rx0 + cx0, ry0 + cy0
+    h_margin = abs_x0 if spec.corner == "bl" else img_w - (abs_x0 + aw)
+    log.info(
+        "%s: alpha %dx%d max %.3f | WIDTH_FRAC %.4f HEIGHT_FRAC %.4f "
+        "MARGIN_%s_FRAC %.4f MARGIN_BOTTOM_FRAC %.4f (native_width %d)",
+        spec.name,
+        aw,
+        ah,
+        float(tight.max()),
+        aw / spec.native_width,
+        ah / spec.native_width,
+        "LEFT" if spec.corner == "bl" else "RIGHT",
+        h_margin / spec.native_width,
+        (img_h - (abs_y0 + ah)) / spec.native_width,
+        spec.native_width,
+    )
+    return (np.clip(tight, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
 def solve_gemini() -> dict[int, NDArray[np.uint8]]:
     """Extract the Gemini sparkle-on-black region from the black capture at each
     bundled logo size (the bg-capture asset format; the engine derives the alpha).
@@ -261,7 +319,12 @@ def main(engine: str) -> None:
     if engine in (*_SPECS, "all"):
         specs = list(_SPECS.values()) if engine == "all" else [_SPECS[engine]]
         for spec in specs:
-            _write(spec.asset, solve_alpha(spec), spec.name)
+            # Lenovo uses a black-only solve (no gray reference capture);
+            # all other text marks use the gray-capture cubic-fit method.
+            if spec.name == "lenovo":
+                _write(spec.asset, solve_alpha_from_black(spec), spec.name)
+            else:
+                _write(spec.asset, solve_alpha(spec), spec.name)
     if engine in ("gemini", "all"):
         for size, img in solve_gemini().items():
             _write(_GEMINI_ASSETS[size], img, f"gemini-{size}")
