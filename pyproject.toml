@@ -117,6 +117,14 @@ lama = [
 esrgan = [
     "spandrel>=0.3.0",
 ]
+# Web GUI server -- FastAPI + uvicorn + multipart upload.  Optional so the
+# default CLI install stays lightweight; only pulled when the user wants the
+# browser-based workflow.
+web = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
@@ -129,7 +137,7 @@ dev = [
     "uv-outdated>=0.1.0; python_version >= '3.12'",
     "uv-secure>=0.12.0; python_version >= '3.12'",
 ]
-all = ["remove-ai-watermarks[gpu,detect,trustmark,lama,dev]"]
+all = ["remove-ai-watermarks[gpu,detect,trustmark,lama,web,dev]"]
 
 # PyTorch Intel-GPU (XPU) wheel index. ``explicit = true`` keeps it inert for
 # the default CPU/CUDA install: uv consults it only when a torch install

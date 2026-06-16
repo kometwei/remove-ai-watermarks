@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remove AI Watermarks</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- LEFT SIDEBAR -->
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h1 class="logo">Remove AI Watermarks</h1>
+      <span class="version">v0.11.2</span>
+    </div>
+
+    <!-- Upload Zone -->
+    <div class="upload-zone" id="upload-zone">
+      <div class="upload-icon">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </div>
+      <div class="upload-text">
+        拖拽图片到此处<br>
+        或 <strong>点击选择文件</strong>
+      </div>
+      <input type="file" id="file-input" multiple accept="image/*" hidden>
+    </div>
+
+    <!-- File List -->
+    <div class="file-list" id="file-list">
+      <!-- Dynamically populated -->
+    </div>
+
+    <!-- Settings -->
+    <div class="settings-section">
+      <h3>水印设置</h3>
+      <div class="form-group">
+        <label for="mark-select">水印类型</label>
+        <select id="mark-select">
+          <option value="auto">自动识别 (Auto)</option>
+          <option value="gemini">Gemini 火花标</option>
+          <option value="doubao">Doubao 豆包AI生成</option>
+          <option value="jimeng">Jimeng 即梦AI</option>
+          <option value="samsung">Samsung Galaxy AI</option>
+          <option value="lenovo">Lenovo AI生成</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="method-select">处理方式</label>
+        <select id="method-select">
+          <option value="reverse-alpha+inpaint">逆 Alpha + 修复 (推荐)</option>
+          <option value="reverse-alpha">仅逆 Alpha</option>
+          <option value="inpaint">仅修复 (Inpaint)</option>
+        </select>
+      </div>
+      <div class="toggle-row">
+        <span>移除 AI 元数据</span>
+        <label class="toggle on" id="toggle-metadata">
+          <input type="checkbox" checked hidden>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="toggle-row">
+        <span>跳过检测强制移除</span>
+        <label class="toggle" id="toggle-force">
+          <input type="checkbox" hidden>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="sidebar-actions">
+      <button class="btn-primary" id="btn-process" disabled>
+        <span class="btn-icon">▶</span> 开始处理
+      </button>
+      <button class="btn-batch" id="btn-batch-download" disabled>
+        ↓ 批量下载全部
+      </button>
+    </div>
+  </aside>
+
+  <!-- MAIN CANVAS AREA -->
+  <main class="canvas-area" id="canvas-area">
+    <!-- Toolbar -->
+    <div class="toolbar" id="toolbar">
+      <div class="tool-group">
+        <button class="tool-btn active" data-mode="compare" id="tool-compare" title="对比模式">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <line x1="12" y1="3" x2="12" y2="21"/>
+          </svg>
+          对比
+        </button>
+        <button class="tool-btn" data-mode="select" id="tool-select" title="框选工具">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" stroke-dasharray="4 2"/>
+          </svg>
+          框选
+        </button>
+        <button class="tool-btn" data-mode="zoom" id="tool-zoom" title="放大镜">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            <line x1="11" y1="8" x2="11" y2="14"/>
+            <line x1="8" y1="11" x2="14" y2="11"/>
+          </svg>
+          缩放
+        </button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <button class="tool-btn tool-btn-sm" id="zoom-fit" title="自适应">适应</button>
+      <button class="tool-btn tool-btn-sm" id="zoom-100" title="原始大小">100%</button>
+      <div class="toolbar-spacer"></div>
+      <span class="zoom-info" id="zoom-info">-- · 0×0</span>
+    </div>
+
+    <!-- Image Display Container -->
+    <div class="image-container" id="image-container">
+      <!-- Empty state -->
+      <div class="empty-state" id="empty-state">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <polyline points="21 15 16 10 5 21"/>
+        </svg>
+        <p>上传图片开始处理</p>
+      </div>
+
+      <!-- Compare View (Before/After slider) -->
+      <div class="compare-view" id="compare-view" style="display:none;">
+        <div class="img-half before" id="img-before">
+          <img id="img-original" alt="Original">
+          <div class="label-badge before-label">Before</div>
+        </div>
+        <div class="img-half after" id="img-after">
+          <img id="img-result" alt="Result">
+          <div class="label-badge after-label">After</div>
+        </div>
+        <div class="space-hint" id="space-hint">
+          长按 <kbd>Space</kbd> 闪现原图
+        </div>
+        <div class="slider-line" id="slider-line"></div>
+        <div class="slider-handle" id="slider-handle">⇔</div>
+      </div>
+
+      <!-- Select View (single image + region selection canvas overlay) -->
+      <div class="select-view" id="select-view" style="display:none;">
+        <canvas id="select-canvas"></canvas>
+      </div>
+
+      <!-- Processing overlay -->
+      <div class="processing-overlay" id="processing-overlay" style="display:none;">
+        <div class="spinner"></div>
+        <p>处理中...</p>
+      </div>
+    </div>
+
+    <!-- Bottom Bar -->
+    <div class="bottom-bar" id="bottom-bar">
+      <span class="info" id="info-name">文件: --</span>
+      <span class="info" id="info-size">尺寸: --</span>
+      <span class="info" id="info-detect">检测到: --</span>
+      <div class="toolbar-spacer"></div>
+      <button class="btn-download-single" id="btn-download" disabled>↓ 下载当前图片</button>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/compare.js"></script>
+<script src="/static/js/canvas.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
