@@ -24,6 +24,7 @@ Entries:
   - ``doubao`` -- ByteDance Doubao "豆包AI生成" text strip, bottom-right.
   - ``jimeng`` -- ByteDance Jimeng / Dreamina "★ 即梦AI" wordmark, bottom-right.
   - ``samsung`` -- Samsung Galaxy AI "Contenuti generati dall'AI" strip, bottom-left.
+  - ``lenovo`` -- Lenovo Tianxi "AI生成" text badge, bottom-right.
 """
 
 from __future__ import annotations
@@ -121,6 +122,10 @@ def _engine(key: str) -> Any:
             from remove_ai_watermarks.samsung_engine import SamsungEngine
 
             _engines[key] = SamsungEngine()
+        elif key == "lenovo":
+            from remove_ai_watermarks.lenovo_engine import LenovoEngine
+
+            _engines[key] = LenovoEngine()
         else:  # pragma: no cover - guarded by the registry keys
             raise KeyError(key)
     return _engines[key]
@@ -198,6 +203,7 @@ _REGISTRY: tuple[KnownMark, ...] = (
     _text_mark("doubao", "Doubao 豆包AI生成 text", "bottom-right"),
     _text_mark("jimeng", "Jimeng 即梦AI wordmark", "bottom-right"),
     _text_mark("samsung", "Samsung Galaxy AI text", "bottom-left"),
+    _text_mark("lenovo", "Lenovo AI生成 text", "bottom-right"),
 )
 
 
