@@ -1334,5 +1334,34 @@ def cmd_batch(
     console.print(f"\n  {processed} processed" + (f"  {errors} errors" if errors else ""))
 
 
+# -- Web GUI server --------------------------------------------------
+
+
+@main.command("serve")
+@click.option("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1.")
+@click.option("--port", type=int, default=8000, help="Bind port. Default: 8000.")
+@click.option("--open-browser/--no-open-browser", default=True, help="Auto-open the browser on start.")
+def cmd_serve(host: str, port: int, open_browser: bool) -> None:
+    """Start the web GUI server for visual watermark removal.
+
+    Launches a local FastAPI server with a browser-based interface for uploading
+    images, selecting watermark types, previewing before/after results, and
+    downloading cleaned images. Requires the [web] extra:
+
+        pip install 'remove-ai-watermarks[web]'
+    """
+    _banner()
+    try:
+        from remove_ai_watermarks.web import run_server
+    except ImportError:
+        console.print(
+            "Error: Web GUI dependencies not installed.\n"
+            "  Install them with: pip install 'remove-ai-watermarks[web]'"
+        )
+        raise SystemExit(1)
+
+    run_server(host=host, port=port, open_browser=open_browser)
+
+
 if __name__ == "__main__":
     main()
