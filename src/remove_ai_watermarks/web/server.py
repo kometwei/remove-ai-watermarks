@@ -334,13 +334,11 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "No result available")
         if not rec.result_path.exists():
             raise HTTPException(404, "Result file not found")
-        # Build a clean filename
-        stem = Path(rec.name).stem
-        suffix = rec.result_path.suffix
+        # Use original filename
         return FileResponse(
             str(rec.result_path),
             media_type="application/octet-stream",
-            filename=f"{stem}_clean{suffix}",
+            filename=rec.name,
         )
 
     @app.get("/api/download-all")
@@ -354,9 +352,7 @@ def create_app() -> FastAPI:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for r in done:
-                stem = Path(r.name).stem
-                suffix = r.result_path.suffix  # type: ignore[union-attr]
-                zf.write(str(r.result_path), f"{stem}_clean{suffix}")
+                zf.write(str(r.result_path), r.name)  # type: ignore[union-attr]
         buf.seek(0)
         return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=results.zip"})
 

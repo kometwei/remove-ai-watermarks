@@ -97,6 +97,13 @@ _CONFIG = TextMarkConfig(
     residual_inpaint_radius=_RESIDUAL_INPAINT_RADIUS,
 )
 
+# Stage-2 fallback: for watermarks on dark/medium backgrounds where the primary
+# glyph mask (luma>150) filters out all candidates.  Uses a relaxed mask
+# (luma>40, tophat>8, open=3) plus a try-removal verification: apply reverse-alpha
+# and re-detect -- if the watermark was real, the confidence drops significantly;
+# if it was noise, the confidence stays the same.  Only tried when Stage 1 fails.
+_STAGE2_MIN_IMPROVEMENT = 0.10  # confidence must drop by this much to confirm
+
 # Lenovo-specific aliases for the shared detection result/engine.
 LenovoDetection = TextMarkDetection
 
@@ -117,7 +124,64 @@ def _template_match_score(box_mask: NDArray[Any], image_width: int) -> float:
 
 
 class LenovoEngine(TextMarkEngine):
-    """Remove the visible Lenovo "AI生成" watermark (locate -> mask -> reverse-alpha)."""
+    """Remove the visible Lenovo "AI生成" watermark (locate -> mask -> reverse-alpha).
+
+    Detection is two-stage: the primary config uses conservative thresholds that
+    work on bright backgrounds; a Stage 2 with relaxed mask extraction plus a
+    try-removal verification catches watermarks on dark/medium backgrounds without
+    false-positive risk.
+    """
 
     def __init__(self) -> None:
         super().__init__(_CONFIG)
+        # Stage-2 engine: relaxed mask extraction for dark backgrounds.
+        self._s2_config = TextMarkConfig(
+            name=_CONFIG.name + "-S2",
+            asset_name=_CONFIG.asset_name,
+            corner=_CONFIG.corner,
+            margin_floor=_CONFIG.margin_floor,
+            width_frac=_CONFIG.width_frac,
+            height_frac=_CONFIG.height_frac,
+            margin_x_frac=_CONFIG.margin_x_frac,
+            margin_bottom_frac=_CONFIG.margin_bottom_frac,
+            max_saturation=_CONFIG.max_saturation,
+            logo_min_luma=40,  # relaxed: catch glyphs on darker backgrounds
+            tophat_delta=8,  # relaxed: catch subtler brightness difference
+            morph_open_size=3,  # gentler: preserve finer strokes
+            detect_min_coverage=_CONFIG.detect_min_coverage,
+            detect_ncc_threshold=0.15,  # permissive: verified by removal test
+            alpha_width_frac=_CONFIG.alpha_width_frac,
+            alpha_height_frac=_CONFIG.alpha_height_frac,
+            alpha_margin_x_frac=_CONFIG.alpha_margin_x_frac,
+            alpha_margin_bottom_frac=_CONFIG.alpha_margin_bottom_frac,
+            alpha_align_search=_CONFIG.alpha_align_search,
+            min_gw=_CONFIG.min_gw,
+            alpha_logo_bgr=_CONFIG.alpha_logo_bgr,
+            residual_alpha_floor=_CONFIG.residual_alpha_floor,
+            residual_dilate=_CONFIG.residual_dilate,
+            residual_inpaint_radius=_CONFIG.residual_inpaint_radius,
+        )
+        self._s2_engine = TextMarkEngine(self._s2_config)
+
+    def detect(self, image: NDArray[Any]) -> TextMarkDetection:
+        """Two-stage detection: primary (safe) then Stage 2 (try-removal verify)."""
+        det = super().detect(image)
+        if det.detected:
+            return det
+        # Stage 2: relaxed mask + try-removal verification
+        s2_det = self._s2_engine.detect(image)
+        if s2_det.confidence < 0.15:
+            return det  # nothing even with relaxed params
+        # Apply reverse-alpha and check if confidence drops (watermark was real)
+        amap_result = self._s2_engine._aligned_alpha_map(image)
+        if amap_result is None:
+            amap_result = self._s2_engine._fixed_alpha_map(image)
+        if amap_result is None:
+            return det
+        amap, _ = amap_result
+        result = self._s2_engine._apply_reverse_alpha(image, amap)
+        after_det = self._s2_engine.detect(result)
+        improvement = s2_det.confidence - after_det.confidence
+        if improvement > _STAGE2_MIN_IMPROVEMENT:
+            return s2_det  # real watermark confirmed
+        return det  # false positive rejected
