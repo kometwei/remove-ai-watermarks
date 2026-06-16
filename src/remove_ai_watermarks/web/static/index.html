@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Remove AI Watermarks</title>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=2">
 </head>
 <body>
 
@@ -79,6 +79,9 @@
     <div class="sidebar-actions">
       <button class="btn-primary" id="btn-process" disabled>
         <span class="btn-icon">▶</span> 开始处理
+      </button>
+      <button class="btn-secondary" id="btn-batch-process" disabled>
+        <span class="btn-icon">⚡</span> 批量处理全部
       </button>
       <button class="btn-batch" id="btn-batch-download" disabled>
         ↓ 批量下载全部
@@ -158,7 +161,7 @@
       <!-- Processing overlay -->
       <div class="processing-overlay" id="processing-overlay" style="display:none;">
         <div class="spinner"></div>
-        <p>处理中...</p>
+        <p class="overlay-text">处理中...</p>
       </div>
     </div>
 
@@ -173,8 +176,8 @@
   </main>
 </div>
 
-<script src="/static/js/compare.js"></script>
-<script src="/static/js/canvas.js"></script>
-<script src="/static/js/app.js"></script>
+<script src="/static/js/compare.js?v=2"></script>
+<script src="/static/js/canvas.js?v=2"></script>
+<script src="/static/js/app.js?v=2"></script>
 </body>
 </html>
