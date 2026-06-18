@@ -269,7 +269,11 @@ class InvisibleEngine:
             # each stage independently imread/imwrote the full-res output, so a run
             # with several stages PNG-decoded+re-encoded the same image 2-4 times.
             # PNG is lossless, so the single-write output is byte-identical.
-            needs_restore = target is not None  # the input was resized before diffusion
+            # Diffusers rounds native dimensions down to the latent grid (multiples
+            # of 8), even when our own resolution policy did not resize the input.
+            # Route those outputs through the same final resize so --no-polish does
+            # not silently change e.g. 1448x1086 into 1448x1080.
+            needs_restore = target is not None or any(dimension % 8 for dimension in orig_size)
             if humanize > 0.0 or unsharp > 0.0 or adaptive_polish or needs_restore:
                 import cv2
 

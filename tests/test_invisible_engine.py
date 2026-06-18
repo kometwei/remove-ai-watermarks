@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from PIL import Image
+
 from remove_ai_watermarks.invisible_engine import InvisibleEngine, _target_size, is_available
 
 
@@ -29,6 +33,29 @@ class TestInvisibleEngineInit:
     def test_default_model_id(self):
         # SDXL base became the default in May 2026 (defeats SynthID v2).
         assert InvisibleEngine.DEFAULT_MODEL_ID == "stabilityai/stable-diffusion-xl-base-1.0"
+
+
+class TestNativeOutputSize:
+    """Model-side latent-grid rounding must not change the public output size."""
+
+    def test_no_polish_restores_native_non_multiple_of_eight_size(self, tmp_path):
+        engine = object.__new__(InvisibleEngine)
+
+        def _remove_watermark(image_path, output_path=None, **_kwargs):
+            out = output_path or image_path.with_stem(image_path.stem + "_clean")
+            # Model-side latent-grid rounding: 18px becomes 16px.
+            Image.open(image_path).crop((0, 0, 24, 16)).save(out)
+            return out
+
+        engine._remover = SimpleNamespace(remove_watermark=_remove_watermark)
+        engine._progress_callback = None
+        src = tmp_path / "src.png"
+        out = tmp_path / "out.png"
+        Image.new("RGB", (24, 18), (128, 128, 128)).save(src)
+
+        engine.remove_watermark(src, out, min_resolution=0, adaptive_polish=False)
+
+        assert Image.open(out).size == (24, 18)
 
 
 class TestTargetSize:
