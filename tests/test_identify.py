@@ -66,6 +66,19 @@ class TestAttributePlatform:
         assert platform
         assert "Stability AI" in platform
 
+    def test_canva(self):
+        platform = _attribute_platform(["Canva"])
+        assert platform
+        assert "Canva" in platform
+
+    def test_byteplus_attributes_to_bytedance(self):
+        # ByteDance's intl brand signs as "Byteplus Pte. Ltd."; the registry maps
+        # it to the ByteDance platform (was mis-read as Adobe via an incidental
+        # "Adobe XMP" file string before the entry existed).
+        platform = _attribute_platform(["BytePlus (ByteDance)"])
+        assert platform
+        assert "ByteDance" in platform
+
     def test_empty_is_none(self):
         assert _attribute_platform([]) is None
 

@@ -122,6 +122,20 @@ C2PA_AI_VENDORS: tuple[C2paAiVendor, ...] = (
     C2paAiVendor(
         b"volcengine", "ByteDance (Volcano Engine)", "ByteDance (Doubao / Jimeng / Volcano Engine)", "ByteDance"
     ),
+    # ByteDance's international brand (BytePlus / Seedream / Seededit) signs its
+    # cert as "Byteplus Pte. Ltd." -- the bare ``volcengine`` needle misses it, so
+    # real BytePlus AI output was mis-attributed (an incidental "Adobe XMP" string
+    # in the file's XMP made it read "Adobe Firefly"). Adding the issuer means the
+    # clean manifest issuer matches "BytePlus (ByteDance)" directly. The platform
+    # string mirrors the volcengine row: both share the "ByteDance" needle, so the
+    # earlier row's label wins anyway -- they normalize together for clash
+    # detection. Verified on real signed files in production traffic, 2026-06-19.
+    C2paAiVendor(b"Byteplus", "BytePlus (ByteDance)", "ByteDance (Doubao / Jimeng / Volcano Engine)", "ByteDance"),
+    # Canva Magic Media signs AI-generated images as "Canva" with a generic
+    # c2pa-rs claim generator + trainedAlgorithmicMedia; without this entry the
+    # source read AI but no platform was attributed. Verified on real signed files
+    # in production traffic, 2026-06-19. Canva does not use SynthID.
+    C2paAiVendor(b"Canva", "Canva", "Canva (Magic Media)", "Canva"),
     # Truepic is a C2PA signing authority, not an AI generator: no platform label,
     # never asserts is_ai (the verdict comes from the digital-source-type).
     C2paAiVendor(b"Truepic", "Truepic", None, None),
