@@ -51,6 +51,13 @@ dependencies = [
     "opencv-python-headless>=4.8.0",
     "click>=8.0.0",
     "python-dotenv>=1.0.0",
+    # Official C2PA reader (Content Authenticity Initiative, MIT/Apache-2.0). The
+    # primary, spec-tracking manifest parser for the identify/metadata path; the
+    # hand-rolled caBX/CBOR scanner in noai/c2pa.py is kept only as a fallback for
+    # synthetic/partial blobs the validator rejects. Binary wheel (Rust), but the
+    # import is light (no torch/numpy) so it fits the dependency-light identify
+    # host. Prebuilt wheels cover the full CI matrix (linux/macos/windows).
+    "c2pa-python>=0.35.0",
 ]
 
 [project.optional-dependencies]

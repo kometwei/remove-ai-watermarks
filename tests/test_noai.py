@@ -182,6 +182,29 @@ class TestC2PARealSamples:
         assert has_c2pa_metadata(out)
         assert "OpenAI" in extract_c2pa_info(out)["issuer"]
 
+    def test_extract_info_uses_reader_store(self):
+        """The c2pa-python reader path: structured (not heuristic) extraction."""
+        from remove_ai_watermarks.noai import c2pa
+
+        assert c2pa.reader_available()
+        info = extract_c2pa_info(SAMPLES_DIR / "chatgpt-1.png")
+        # The store-JSON label proves the reader path served this, not the
+        # caBX-chunk fallback ("C2PA manifest (...)").
+        assert info["c2pa_manifest"].startswith("C2PA manifest store")
+        # Structured claim generator is exact, not a CBOR-scanned best-effort.
+        assert info["claim_generator"] == "ChatGPT"
+
+    def test_fallback_to_png_parser_when_reader_unavailable(self, monkeypatch):
+        """With the reader disabled, the hand-rolled PNG parser still works."""
+        from remove_ai_watermarks.noai import c2pa
+
+        monkeypatch.setattr(c2pa, "_C2PA_READER_AVAILABLE", False)
+        info = extract_c2pa_info(SAMPLES_DIR / "chatgpt-1.png")
+        assert info["c2pa_manifest"].startswith("C2PA manifest (")  # chunk path
+        assert "OpenAI" in info["issuer"]
+        assert "trainedAlgorithmicMedia" in info["source_type"]
+        assert "synthid_watermark" in info
+
 
 class TestC2PAInjectValidation:
     def test_inject_rejects_non_png(self, tmp_path):

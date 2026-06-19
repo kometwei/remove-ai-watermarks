@@ -297,17 +297,13 @@ def has_ai_metadata(image_path: Path) -> bool:
     except Exception as exc:
         logger.debug("PIL could not open %s for metadata scan: %s", image_path, exc)
 
-    # Check C2PA — via the official ``c2pa`` lib if available, otherwise via a
-    # binary scan that also catches AVIF/HEIF/JPEG-XL containers (PIL doesn't
-    # expose their metadata uniformly).
-    try:
-        # optional official lib, not a declared dep -> falls back to the binary scan
-        from c2pa import has_c2pa_metadata  # pyright: ignore[reportMissingImports, reportUnknownVariableType]
+    # Check C2PA — via the official c2pa-python reader first (spec-tracking, every
+    # container it supports), then a binary scan that also catches AVIF/HEIF/JPEG-XL
+    # containers and synthetic/partial blobs the validator rejects.
+    from remove_ai_watermarks.noai.c2pa import read_manifest_store_json
 
-        if has_c2pa_metadata(image_path):
-            return True
-    except ImportError:
-        pass
+    if read_manifest_store_json(image_path) is not None:
+        return True
 
     # Binary scan covers C2PA (PNG caBX, JPEG APP11, AVIF/HEIF/JXL uuid boxes)
     # and IPTC AI markers in XMP. First 512KB (plus late ISOBMFF provenance boxes).
