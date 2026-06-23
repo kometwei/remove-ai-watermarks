@@ -103,8 +103,9 @@ class InvisibleEngine:
             device: Device for inference (auto/cpu/mps/cuda/xpu). None = auto.
             pipeline: Pipeline profile. "controlnet" (DEFAULT; SDXL + canny ControlNet
                 that preserves text/face structure via edge conditioning while removing
-                SynthID) or "sdxl" (plain SDXL img2img, lighter but leaves SynthID on
-                flat-graphic content). "default" is a back-compat alias for "sdxl".
+                SynthID), "sdxl" (plain SDXL img2img, lighter but leaves SynthID on
+                flat-graphic content), or "qwen" (Qwen-Image 20B img2img, best text/
+                structure preservation but CUDA/cloud-class). "default" aliases "sdxl".
             hf_token: HuggingFace API token.
             progress_callback: Optional callback for progress messages.
             controlnet_conditioning_scale: ControlNet structure-preservation
@@ -170,6 +171,9 @@ class InvisibleEngine:
         unsharp: float = 0.0,
         adaptive_polish: bool = False,
         upscaler: str = "lanczos",
+        tile: bool = False,
+        tile_size: int = 1024,
+        tile_overlap: int = 128,
     ) -> Path:
         """Remove invisible watermark from an image.
 
@@ -205,6 +209,13 @@ class InvisibleEngine:
                 via the ``esrgan`` extra). Only applies when UPscaling (the floor
                 case); a ``max_resolution`` downscale always uses Lanczos. Falls back
                 to Lanczos if the extra is absent.
+            tile: Process the diffusion pass in overlapping tiles instead of one
+                forward pass -- the lossless alternative to ``max_resolution`` for
+                large inputs that OOM on MPS/GPU. Engages only when the long side
+                exceeds ``tile_size``. Pair with ``max_resolution=0`` (the default)
+                so the input keeps its native resolution.
+            tile_size: Tile dimension in px (default 1024).
+            tile_overlap: Overlap between adjacent tiles in px (default 128).
 
         Returns:
             Path to the cleaned image.
@@ -261,6 +272,9 @@ class InvisibleEngine:
                 guidance_scale=guidance_scale,
                 seed=seed,
                 vendor=vendor,
+                tile=tile,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
             )
 
             # Post-processing chain: decode the diffusion output ONCE, apply the
@@ -269,7 +283,11 @@ class InvisibleEngine:
             # each stage independently imread/imwrote the full-res output, so a run
             # with several stages PNG-decoded+re-encoded the same image 2-4 times.
             # PNG is lossless, so the single-write output is byte-identical.
-            needs_restore = target is not None  # the input was resized before diffusion
+            # Diffusers rounds native dimensions down to the latent grid (multiples
+            # of 8), even when our own resolution policy did not resize the input.
+            # Route those outputs through the same final resize so --no-polish does
+            # not silently change e.g. 1448x1086 into 1448x1080.
+            needs_restore = target is not None or any(dimension % 8 for dimension in orig_size)
             if humanize > 0.0 or unsharp > 0.0 or adaptive_polish or needs_restore:
                 import cv2
 

@@ -189,6 +189,33 @@ _adaptive_polish_option = click.option(
     "no-op there. Pass --no-adaptive-polish to disable. Independent of --unsharp/--humanize.",
 )
 
+
+# Tiled-diffusion knobs, shared by the diffusion commands (invisible/all/batch).
+# Tiling is the lossless alternative to --max-resolution for large inputs that OOM
+# on MPS/GPU: process at native resolution in overlapping, feather-blended tiles.
+def _tile_options(f: Any) -> Any:
+    """Apply the --tile / --tile-size / --tile-overlap options to a command."""
+    f = click.option(
+        "--tile-overlap",
+        type=int,
+        default=128,
+        help="Overlap between adjacent tiles in px (feather-blended, no seam). Default 128.",
+    )(f)
+    f = click.option(
+        "--tile-size",
+        type=int,
+        default=1024,
+        help="Tile dimension in px for --tile (SDXL's training size). Default 1024.",
+    )(f)
+    return click.option(
+        "--tile/--no-tile",
+        default=False,
+        help="Process large images in overlapping tiles instead of one forward pass -- the lossless "
+        "alternative to --max-resolution for inputs that OOM on MPS/GPU. Engages only when the long "
+        "side exceeds --tile-size; pair with --max-resolution 0 (default) to keep native resolution. Default off.",
+    )(f)
+
+
 # HuggingFace model + CFG knobs, shared by the diffusion commands (invisible/all/batch)
 # so the surface stays identical across them.
 _model_option = click.option(
@@ -226,15 +253,16 @@ def _normalize_pipeline(ctx: click.Context, param: click.Parameter, value: str |
     return normalized
 
 
-# ``controlnet`` (the default-SELECTED value) and ``sdxl`` (plain SDXL img2img) are the
-# two current profiles; ``default`` is an OUTDATED back-compat alias for ``sdxl``
-# (warned + normalized away by _normalize_pipeline).
-_PIPELINE_CHOICES = ["sdxl", "controlnet", "default"]
+# ``controlnet`` (the default-SELECTED value), ``sdxl`` (plain SDXL img2img) and
+# ``qwen`` (Qwen-Image, CUDA/cloud-class) are the current profiles; ``default`` is an
+# OUTDATED back-compat alias for ``sdxl`` (warned + normalized away by _normalize_pipeline).
+_PIPELINE_CHOICES = ["sdxl", "controlnet", "qwen", "default"]
 _PIPELINE_HELP = (
     "Pipeline profile. controlnet (DEFAULT) = SDXL + canny ControlNet that preserves "
     "text/faces via edge conditioning while removing SynthID; sdxl = plain SDXL img2img "
-    "(lighter, no extra model download, but leaves SynthID on flat-graphic content). "
-    "('default' is an OUTDATED alias for 'sdxl' -- use sdxl or controlnet.)"
+    "(lighter, no extra model download, but leaves SynthID on flat-graphic content); "
+    "qwen = Qwen-Image (20B, Apache-2.0) img2img, best text/structure preservation but "
+    "CUDA/cloud-class (does not fit MPS). ('default' is an OUTDATED alias for 'sdxl'.)"
 )
 
 # Shared --pipeline / --strength decorators so the three diffusion commands
@@ -252,6 +280,16 @@ _strength_option = click.option(
     type=float,
     default=None,
     help=f"Denoising strength (0.0-1.0). Default: {strength_default_help()}.",
+)
+_force_option = click.option(
+    "--force/--no-force",
+    default=False,
+    help=(
+        "Run the diffusion scrub even when no invisible AI watermark is locally "
+        "detectable. Default: skip it (regeneration only degrades a clean image; a "
+        "skip never claims the image is watermark-free -- a pixel SynthID is "
+        "undetectable once its metadata proxy is gone)."
+    ),
 )
 
 
@@ -358,6 +396,55 @@ def _no_visible_mark_exit(source: Path) -> NoReturn:
             f"    remove-ai-watermarks erase {source.name} --region x,y,w,h"
         )
     raise SystemExit(EXIT_NO_VISIBLE_MARK)
+
+
+# Same value as EXIT_NO_VISIBLE_MARK (2): a distinct-from-success / distinct-from-
+# error code that tells a wrapping service (raiw.cc) "the diffusion scrub was skipped
+# because no invisible watermark was locally detectable", so it can surface the
+# message instead of charging for and serving an unchanged image as done.
+EXIT_NO_INVISIBLE_SIGNAL = 2
+
+
+def _no_invisible_signal_exit(source: Path) -> NoReturn:
+    """Explain why the diffusion scrub was skipped, then exit non-zero.
+
+    The ``invisible`` command regenerates pixels to remove SynthID / open
+    watermarks; that regeneration also degrades a real photo. When
+    :func:`identify` finds no locally-detectable invisible AI signal, running it
+    anyway would damage a clean image for nothing -- the dominant paid score-0
+    cause on no-watermark uploads. So skip it, but do NOT imply the image is
+    clean: a pixel SynthID is undetectable here once its metadata proxy is gone.
+    Write no output and exit :data:`EXIT_NO_INVISIBLE_SIGNAL`; ``--force`` runs
+    the scrub regardless.
+    """
+    console.print(
+        "  No invisible AI watermark detected (no C2PA/SynthID proxy, no open\n"
+        "  watermark). Skipped the diffusion scrub -- regenerating the pixels would\n"
+        "  only degrade the image with nothing to remove, so no output was written.\n"
+        "  This does NOT prove the image is clean: a pixel watermark such as SynthID\n"
+        "  cannot be detected here once its metadata proxy is absent (it may have\n"
+        "  been stripped earlier). If you know the image is AI-generated and want the\n"
+        "  pixels regenerated regardless, re-run with --force:\n"
+        f"    remove-ai-watermarks invisible {source.name} --force"
+    )
+    raise SystemExit(EXIT_NO_INVISIBLE_SIGNAL)
+
+
+def _should_skip_invisible_scrub(force: bool, image_path: Path) -> bool:
+    """True when the diffusion scrub should be skipped for *image_path*.
+
+    The shared no-signal gate for ``invisible`` / ``all`` / ``batch``: skip when
+    ``--force`` is not set AND no invisible AI watermark is locally detectable
+    (regenerating pixels would only degrade a clean image -- the dominant paid
+    score-0 cause). Centralizes the condition + the lazy ``has_invisible_target``
+    import so the three call sites cannot drift. ``--force`` short-circuits the
+    detection entirely.
+    """
+    if force:
+        return False
+    from remove_ai_watermarks.identify import has_invisible_target
+
+    return not has_invisible_target(image_path)
 
 
 def _read_bgr_and_alpha(path: Path) -> tuple[NDArray[Any] | None, NDArray[Any] | None]:
@@ -668,6 +755,8 @@ def cmd_erase(
 @_guidance_scale_option
 @_auto_option
 @_adaptive_polish_option
+@_tile_options
+@_force_option
 @click.pass_context
 def cmd_invisible(
     ctx: click.Context,
@@ -689,6 +778,10 @@ def cmd_invisible(
     guidance_scale: float | None,
     auto: bool,
     adaptive_polish: bool,
+    tile: bool,
+    tile_size: int,
+    tile_overlap: int,
+    force: bool,
 ) -> None:
     """Remove invisible AI watermarks (SynthID, StableSignature, TreeRing).
 
@@ -713,6 +806,13 @@ def cmd_invisible(
 
     device_str = None if device == "auto" else device
 
+    # Gate BEFORE building the engine: skip the destructive regeneration when no
+    # invisible AI watermark is locally detectable (it would only degrade a clean
+    # image -- dominant paid score-0 cause), so the common skip path pays nothing for
+    # engine construction. A skip never claims the image is clean; --force overrides.
+    if _should_skip_invisible_scrub(force, source):
+        _no_invisible_signal_exit(source)
+
     def progress_cb(msg: str) -> None:
         console.print(f"  {msg}")
 
@@ -730,7 +830,7 @@ def cmd_invisible(
     vendor = vendor_for_strength(source)
     console.print(f"  Input:    {source.name}")
     console.print(f"  Pipeline: {pipeline}")
-    console.print(f"  Strength: {resolve_strength(strength, vendor)}  Steps: {steps}")
+    console.print(f"  Strength: {resolve_strength(strength, vendor, pipeline)}  Steps: {steps}")
 
     t0 = time.monotonic()
     result_path = engine.remove_watermark(
@@ -747,6 +847,9 @@ def cmd_invisible(
         min_resolution=min_resolution,
         upscaler=upscaler,
         vendor=vendor,
+        tile=tile,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
     )
     elapsed = time.monotonic() - t0
 
@@ -846,6 +949,13 @@ def cmd_identify(ctx: click.Context, source: Path, no_visible: bool, as_json: bo
 
     _banner()
     verdict = {True: "AI-generated", False: "not AI", None: "unknown"}[report.is_ai_generated]
+    # Sharpen the True verdict when the C2PA source type says the image is a real
+    # photo with an AI-composited region rather than a full AI generation, so the
+    # caller (and the user) can tell "scrub the whole frame" from "scrub the AI region".
+    if report.is_ai_generated and report.ai_source_kind == "enhanced":
+        verdict = "AI-enhanced (real content with an AI-composited region)"
+    elif report.is_ai_generated and report.ai_source_kind == "generated":
+        verdict = "AI-generated (fully synthetic)"
     console.print(f"\n  Verdict: {verdict}  (confidence: {report.confidence})")
     console.print(f"  Platform: {report.platform or 'undetermined'}")
 
@@ -917,6 +1027,8 @@ def cmd_identify(ctx: click.Context, source: Path, no_visible: bool, as_json: bo
 @_guidance_scale_option
 @_auto_option
 @_adaptive_polish_option
+@_tile_options
+@_force_option
 @click.pass_context
 def cmd_all(
     ctx: click.Context,
@@ -940,6 +1052,10 @@ def cmd_all(
     guidance_scale: float | None,
     auto: bool,
     adaptive_polish: bool,
+    tile: bool,
+    tile_size: int,
+    tile_overlap: int,
+    force: bool,
 ) -> None:
     """Remove ALL watermarks: visible + invisible + metadata.
 
@@ -1008,6 +1124,18 @@ def cmd_all(
                 "    Warning: Skipped - GPU dependencies not installed.\n"
                 "    Install them with: pip install 'remove-ai-watermarks[gpu]'"
             )
+        elif _should_skip_invisible_scrub(force, source):
+            # No locally-detectable invisible watermark -> skip the destructive
+            # regeneration (it would only degrade the image). The visible-removed
+            # pixels in tmp_path are kept and step 3 still strips metadata, so this
+            # is a SUCCESS (exit 0), unlike the GPU-missing skip above. Read the
+            # pristine `source`, not tmp_path whose C2PA the visible pass already
+            # dropped. Not a clean-image guarantee; --force overrides.
+            console.print(
+                "    Skipped (no invisible AI watermark detected; pixels left intact).\n"
+                "    Not a clean-image guarantee: a pixel SynthID is undetectable once its\n"
+                "    metadata proxy is gone. Re-run with --force to scrub regardless."
+            )
         else:
             from remove_ai_watermarks.invisible_engine import InvisibleEngine
 
@@ -1029,7 +1157,7 @@ def cmd_all(
             # already lost its C2PA to the visible-removal pass, so reading it would
             # always resolve to the unknown-vendor default.
             vendor = vendor_for_strength(source)
-            console.print(f"    Strength: {resolve_strength(strength, vendor)}  Steps: {steps}")
+            console.print(f"    Strength: {resolve_strength(strength, vendor, pipeline)}  Steps: {steps}")
             inv_engine.remove_watermark(
                 image_path=tmp_path,
                 output_path=tmp_path,
@@ -1044,6 +1172,9 @@ def cmd_all(
                 min_resolution=min_resolution,
                 upscaler=upscaler,
                 vendor=vendor,
+                tile=tile,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
             )
             console.print("    Invisible watermark removed")
 
@@ -1121,6 +1252,10 @@ def _process_batch_image(
     model: str | None = None,
     guidance_scale: float | None = None,
     adaptive_polish: bool = False,
+    tile: bool = False,
+    tile_size: int = 1024,
+    tile_overlap: int = 128,
+    force: bool = False,
 ) -> None:
     """Process a single image for batch mode.
 
@@ -1151,7 +1286,11 @@ def _process_batch_image(
             is_available as invisible_available,
         )
 
-        if invisible_available():
+        # Skip the destructive regeneration when no invisible watermark is locally
+        # detectable (would only degrade a clean image). Read the pristine `img_path`;
+        # `out_path` may already be the visible-processed result. --force overrides.
+        skip_no_signal = _should_skip_invisible_scrub(force, img_path)
+        if invisible_available() and not skip_no_signal:
             from remove_ai_watermarks.invisible_engine import InvisibleEngine
 
             # Cache the engine in ctx.obj so the batch builds it once (pipeline is a
@@ -1179,10 +1318,20 @@ def _process_batch_image(
                 max_resolution=max_resolution,
                 min_resolution=min_resolution,
                 upscaler=upscaler,
+                tile=tile,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
                 # Detect the vendor from the pristine original (`img_path`), not the
                 # visible-processed `out_path` whose C2PA is already gone.
                 vendor=vendor_for_strength(img_path),
             )
+        elif skip_no_signal and mode == "invisible" and not out_path.exists():
+            # No invisible target and the visible/all pass did not write out_path
+            # (invisible mode): copy the input through so the output dir is complete
+            # with the pixels deliberately left intact.
+            src_bgr, src_alpha = _read_bgr_and_alpha(img_path)
+            if src_bgr is not None:
+                _write_bgr_with_alpha(out_path, src_bgr, src_alpha)
 
     if mode in ("metadata", "all"):
         from remove_ai_watermarks.metadata import remove_ai_metadata
@@ -1238,6 +1387,8 @@ def _process_batch_image(
 @_guidance_scale_option
 @_auto_option
 @_adaptive_polish_option
+@_tile_options
+@_force_option
 @click.pass_context
 def cmd_batch(
     ctx: click.Context,
@@ -1261,6 +1412,10 @@ def cmd_batch(
     guidance_scale: float | None,
     auto: bool,
     adaptive_polish: bool,
+    tile: bool,
+    tile_size: int,
+    tile_overlap: int,
+    force: bool,
 ) -> None:
     """Process all images in a directory."""
     _banner()
@@ -1321,6 +1476,10 @@ def cmd_batch(
                     model=model,
                     guidance_scale=guidance_scale,
                     adaptive_polish=adaptive_polish,
+                    tile=tile,
+                    tile_size=tile_size,
+                    tile_overlap=tile_overlap,
+                    force=force,
                 )
                 processed += 1
 
