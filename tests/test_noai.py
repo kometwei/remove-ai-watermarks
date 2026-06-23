@@ -36,6 +36,7 @@ from remove_ai_watermarks.noai.extractor import (
     has_ai_metadata,
 )
 from remove_ai_watermarks.noai.isobmff import (
+    blank_ai_exif_tokens,
     is_isobmff,
     strip_c2pa_boxes,
 )
@@ -181,6 +182,37 @@ class TestC2PARealSamples:
         inject_c2pa_chunk(tmp_clean_png, out, chunk)
         assert has_c2pa_metadata(out)
         assert "OpenAI" in extract_c2pa_info(out)["issuer"]
+
+    def test_extract_info_flux_jpeg_via_reader(self):
+        """Real committed JPEG-with-C2PA fixture: the non-PNG reader path works."""
+        info = extract_c2pa_info(SAMPLES_DIR / "flux-1.jpg")
+        assert info["has_c2pa"] is True
+        assert info["c2pa_manifest"].startswith("C2PA manifest store")  # reader, not chunk
+        assert "Black Forest Labs" in info["issuer"]
+        assert "trainedAlgorithmicMedia" in info["source_type"]
+
+    def test_extract_info_uses_reader_store(self):
+        """The c2pa-python reader path: structured (not heuristic) extraction."""
+        from remove_ai_watermarks.noai import c2pa
+
+        assert c2pa.reader_available()
+        info = extract_c2pa_info(SAMPLES_DIR / "chatgpt-1.png")
+        # The store-JSON label proves the reader path served this, not the
+        # caBX-chunk fallback ("C2PA manifest (...)").
+        assert info["c2pa_manifest"].startswith("C2PA manifest store")
+        # Structured claim generator is exact, not a CBOR-scanned best-effort.
+        assert info["claim_generator"] == "ChatGPT"
+
+    def test_fallback_to_png_parser_when_reader_unavailable(self, monkeypatch):
+        """With the reader disabled, the hand-rolled PNG parser still works."""
+        from remove_ai_watermarks.noai import c2pa
+
+        monkeypatch.setattr(c2pa, "_C2PA_READER_AVAILABLE", False)
+        info = extract_c2pa_info(SAMPLES_DIR / "chatgpt-1.png")
+        assert info["c2pa_manifest"].startswith("C2PA manifest (")  # chunk path
+        assert "OpenAI" in info["issuer"]
+        assert "trainedAlgorithmicMedia" in info["source_type"]
+        assert "synthid_watermark" in info
 
 
 class TestC2PAInjectValidation:
@@ -334,6 +366,44 @@ class TestISOBMFF:
         cleaned, stripped = strip_c2pa_boxes(data)
         assert stripped == 0
         assert cleaned == data
+
+    @staticmethod
+    def _avif_with_exif(exif_0th: dict) -> bytes:
+        """A fake AVIF (ftyp + mdat) whose mdat carries an EXIF TIFF block, as a
+        HEIF/AVIF ``Exif`` meta-box item stores it (bytes in mdat)."""
+        import piexif
+
+        blob = piexif.dump({"0th": exif_0th})
+        mdat = struct.pack(">I", 8 + len(blob)) + b"mdat" + blob
+        return FTYP + mdat
+
+    def test_blank_ai_token_in_exif_item(self):
+        import piexif
+
+        data = self._avif_with_exif({piexif.ImageIFD.Software: b"DALL-E", piexif.ImageIFD.Make: b"Canon"})
+        out, blanked = blank_ai_exif_tokens(data)
+        assert blanked == 1
+        assert len(out) == len(data)  # same length -> box sizes / iloc stay valid
+        assert b"DALL-E" not in out  # AI token destroyed
+        assert b"Canon" in out  # camera tag preserved
+        # The TIFF structure still parses, with the AI value blanked and Make kept.
+        blob = out[out.index(b"Exif\x00\x00") + 6 :]
+        ifd = piexif.load(blob)["0th"]
+        assert ifd[piexif.ImageIFD.Software].strip() == b""
+        assert ifd[piexif.ImageIFD.Make] == b"Canon"
+
+    def test_blank_leaves_clean_exif_untouched(self):
+        import piexif
+
+        data = self._avif_with_exif({piexif.ImageIFD.Software: b"Adobe Photoshop", piexif.ImageIFD.Make: b"NIKON"})
+        out, blanked = blank_ai_exif_tokens(data)
+        assert blanked == 0
+        assert out == data  # no AI token -> byte-for-byte unchanged
+
+    def test_blank_no_exif_is_noop(self):
+        out, blanked = blank_ai_exif_tokens(FTYP + b"\x00\x00\x00\x0cmdat" + b"pixels!!")
+        assert blanked == 0
+        assert out == FTYP + b"\x00\x00\x00\x0cmdat" + b"pixels!!"
 
 
 class TestC2PAInvalidSignature:

@@ -1,8 +1,11 @@
 """C2PA (Coalition for Content Provenance and Authenticity) metadata handling.
 
-C2PA metadata is embedded in PNG files as a JUMBF container chunk
-(``caBX``).  This module can detect, extract, and re-inject those
-chunks.  Supported issuers:
+Reading goes through the official c2pa-python ``Reader`` first (any container it
+supports), via ``extract_c2pa_info`` / ``read_manifest_store_json``. The
+hand-rolled PNG ``caBX`` JUMBF-chunk tools below (``has_c2pa_metadata`` /
+``extract_c2pa_chunk`` / ``inject_c2pa_chunk`` and the ``_extract_c2pa_info_png``
+fallback) cover raw-chunk extraction, re-injection, and the cases the validator
+rejects (synthetic/partial blobs, a broken/absent wheel). Known issuers:
 
 - Google Imagen
 - Adobe Firefly
@@ -10,17 +13,22 @@ chunks.  Supported issuers:
 - OpenAI (ChatGPT, GPT-4o, Sora, DALL-E)
 - Truepic (signing authority)
 
-The parser uses byte-level scanning — it does not validate JUMBF/CBOR
-structure but reliably identifies known signatures, issuers, tools,
-and actions.
+The fallback parser uses byte-level scanning — it does not validate JUMBF/CBOR
+structure but reliably identifies known signatures, issuers, tools, and actions.
+The vendor / source-type / SynthID / soft-binding registry scan
+(``_populate_registry_fields``) is shared by both the reader and fallback paths.
 """
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import json
+import logging
 import re
 import struct
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from remove_ai_watermarks.noai.constants import (
     C2PA_ACTIONS,
@@ -32,6 +40,72 @@ from remove_ai_watermarks.noai.constants import (
     PNG_SIGNATURE,
     SYNTHID_C2PA_ISSUERS,
 )
+
+log = logging.getLogger(__name__)
+
+# Official C2PA reader (c2pa-python, a core dependency). It is the primary,
+# spec-tracking manifest parser; the hand-rolled caBX/CBOR scanner below stays as
+# a fallback for synthetic/partial blobs the validator rejects. The import is
+# guarded so a partially-broken install degrades to the byte-scan rather than
+# crashing the dependency-light identify path.
+_C2paReader: Any = None
+with contextlib.suppress(Exception):  # broken/absent wheel -> byte-scan fallback
+    from c2pa import Reader as _C2paReader  # pyright: ignore[reportMissingTypeStubs]
+_C2PA_READER_AVAILABLE = _C2paReader is not None
+
+
+def reader_available() -> bool:
+    """True when the official c2pa-python Reader imported successfully."""
+    return _C2PA_READER_AVAILABLE
+
+
+def read_manifest_store_json(image_path: Path) -> str | None:
+    """Return the full C2PA manifest-store JSON for ``image_path``, or None.
+
+    Uses the official c2pa-python ``Reader`` (any container it supports: PNG,
+    JPEG, WebP, AVIF/HEIF, MP4, ...). Returns None when the reader is unavailable,
+    the file carries no parseable manifest, or parsing fails. The JSON is the
+    WHOLE store (every manifest plus ingredient manifests), matching the
+    whole-chunk semantics of the legacy byte scan -- an AI-source marker in a
+    parent/ingredient manifest (e.g. a ChatGPT edit of a Sora generation) is
+    still seen.
+
+    Memoized per (path, mtime): one identify/get_ai_metadata call invokes the
+    structured parser ~3 times on the same file, so the cache turns the repeated
+    crypto-validating reads into one.
+    """
+    if not _C2PA_READER_AVAILABLE:
+        return None
+    try:
+        mtime = image_path.stat().st_mtime_ns
+    except OSError:
+        return _read_manifest_store_impl(str(image_path))
+    return _read_manifest_store_cached(str(image_path), mtime)
+
+
+@functools.lru_cache(maxsize=8)
+def _read_manifest_store_cached(path_str: str, _mtime_ns: int) -> str | None:
+    """Cache shim: ``_mtime_ns`` is part of the key only (invalidates on change)."""
+    return _read_manifest_store_impl(path_str)
+
+
+def _read_manifest_store_impl(path_str: str) -> str | None:
+    # try_create returns None when there is no manifest; a default Reader does no
+    # trust enforcement, so an untrusted signer still yields the manifest content
+    # (we report what is in the file, we do not gate on certificate trust).
+    try:
+        reader = _C2paReader.try_create(path_str)
+    except Exception as exc:  # malformed manifest, unsupported container, etc.
+        log.debug("c2pa Reader could not parse %s: %s", path_str, exc)
+        return None
+    if reader is None:
+        return None
+    try:
+        with reader:
+            return reader.json()
+    except Exception as exc:  # pragma: no cover - reader opened but json() failed
+        log.debug("c2pa Reader.json() failed on %s: %s", path_str, exc)
+        return None
 
 
 def has_c2pa_metadata(image_path: Path) -> bool:
@@ -90,16 +164,83 @@ def has_c2pa_metadata(image_path: Path) -> bool:
     return False
 
 
+def _claim_generator_from_store(store: dict[str, Any]) -> str | None:
+    """Structured claim-generator name from the active manifest of a store dict.
+
+    Prefers the top-level ``claim_generator`` string (Firefly: "Adobe_Firefly"),
+    falling back to the first ``claim_generator_info[].name`` (ChatGPT keys it
+    only there). isprintable() guards against odd binary-ish values.
+    """
+    active = _active_manifest(store)
+    generator: Any = active.get("claim_generator")
+    if not (isinstance(generator, str) and generator):
+        info_list: list[Any] = active.get("claim_generator_info") or []
+        if info_list and isinstance(first := info_list[0], dict):
+            generator = cast("dict[str, Any]", first).get("name")
+    return generator if isinstance(generator, str) and generator and generator.isprintable() else None
+
+
+def _active_manifest(store: dict[str, Any]) -> dict[str, Any]:
+    """The active manifest dict from a manifest-store dict, or {} when absent."""
+    manifests: Any = store.get("manifests")
+    if not isinstance(manifests, dict):
+        return {}
+    active = cast("dict[str, Any]", manifests).get(store.get("active_manifest", ""))
+    return cast("dict[str, Any]", active) if isinstance(active, dict) else {}
+
+
+def _info_from_store_json(store_json: str) -> dict[str, Any]:
+    """Build the C2PA info dict from a c2pa-python manifest-store JSON string."""
+    store_bytes = store_json.encode("utf-8")
+    c2pa_info: dict[str, Any] = {
+        "has_c2pa": True,
+        "type": "C2PA (Coalition for Content Provenance and Authenticity)",
+        "c2pa_manifest": f"C2PA manifest store ({len(store_bytes)} bytes)",
+    }
+    # The whole-store JSON carries every vendor / source-type / SynthID /
+    # soft-binding signature (across active + ingredient manifests), so the same
+    # registry scan that runs on the raw caBX chunk applies unchanged here.
+    _populate_registry_fields(store_bytes, c2pa_info)
+
+    try:
+        parsed: Any = json.loads(store_json)
+    except (ValueError, TypeError):
+        return c2pa_info
+    if not isinstance(parsed, dict):
+        return c2pa_info
+    store = cast("dict[str, Any]", parsed)
+    if generator := _claim_generator_from_store(store):
+        c2pa_info["claim_generator"] = generator
+    sig: Any = _active_manifest(store).get("signature_info")
+    if isinstance(sig, dict) and (time := cast("dict[str, Any]", sig).get("time")):
+        c2pa_info["timestamp"] = str(time)
+    return c2pa_info
+
+
 def extract_c2pa_info(image_path: Path) -> dict[str, Any]:
     """
-    Extract basic C2PA metadata information from an image.
+    Extract C2PA metadata information from an image.
+
+    Uses the official c2pa-python reader first (any supported container), falling
+    back to the hand-rolled PNG caBX parser when the reader is unavailable or the
+    file carries no parseable manifest (synthetic/partial blobs).
 
     Args:
         image_path: Path to the image file.
 
     Returns:
-        Dictionary containing C2PA metadata info.
+        Dictionary containing C2PA metadata info, or {} when none is found.
     """
+    image_path = Path(image_path)
+
+    if (store_json := read_manifest_store_json(image_path)) is not None:
+        return _info_from_store_json(store_json)
+
+    return _extract_c2pa_info_png(image_path)
+
+
+def _extract_c2pa_info_png(image_path: Path) -> dict[str, Any]:
+    """Fallback PNG caBX parser, used when the c2pa-python reader finds nothing."""
     c2pa_info: dict[str, Any] = {}
 
     if not has_c2pa_metadata(image_path):
@@ -199,25 +340,74 @@ def soft_binding_vendors_in(buffer: bytes) -> list[str]:
     return sorted({name for sig, name in C2PA_SOFT_BINDINGS.items() if sig in buffer})
 
 
+def _populate_registry_fields(buf: bytes, c2pa_info: dict[str, Any]) -> bool:
+    """Populate the registry-driven C2PA fields by scanning ``buf``.
+
+    Shared by the legacy caBX-chunk parser and the c2pa-python store-JSON path so
+    both produce an identical dict shape. ``buf`` is the raw manifest bytes for
+    the former and the manifest-store JSON (UTF-8) for the latter; the vendor /
+    tool / action / source-type / SynthID / soft-binding signatures appear in
+    both. Sets ``issuer``, ``ai_tool``, ``actions``, ``source_type``,
+    ``synthid_vendors`` / ``synthid_watermark``, ``soft_binding_vendors`` /
+    ``soft_binding`` when present and returns whether the source type is AI.
+    """
+    if issuers := [name for sig, name in C2PA_ISSUERS.items() if sig in buf]:
+        c2pa_info["issuer"] = ", ".join(dict.fromkeys(issuers))
+
+    if ai_tools := [name for sig, name in C2PA_AI_TOOLS.items() if sig in buf]:
+        c2pa_info["ai_tool"] = ", ".join(dict.fromkeys(ai_tools))
+
+    if actions := [name for sig, name in C2PA_ACTIONS.items() if sig in buf]:
+        c2pa_info["actions"] = ", ".join(actions)
+
+    # Digital source type (matched anywhere in the store, including ingredient
+    # manifests -- a ChatGPT edit of a Sora generation carries the AI marker on
+    # the parent, not the active manifest).
+    # ``ai_source_kind`` is the structured generated-vs-enhanced split the caller
+    # branches on (full-frame scrub vs region-targeted clean); ``source_type`` is the
+    # human-readable form. The two byte strings are unambiguous:
+    # "compositeWithTrainedAlgorithmicMedia" capitalizes the inner "Trained", so a
+    # lowercase "trainedAlgorithmicMedia" match is standalone full generation, which
+    # wins when both appear (an edit chain).
+    ai_source = False
+    if b"trainedAlgorithmicMedia" in buf:
+        c2pa_info["source_type"] = "trainedAlgorithmicMedia (AI-generated)"
+        c2pa_info["ai_source_kind"] = "generated"
+        ai_source = True
+    elif b"algorithmicMedia" in buf:
+        c2pa_info["source_type"] = "algorithmicMedia"
+    elif b"compositeWithTrainedAlgorithmicMedia" in buf:
+        c2pa_info["source_type"] = "compositeWithTrainedAlgorithmicMedia (AI-enhanced)"
+        c2pa_info["ai_source_kind"] = "enhanced"
+        ai_source = True
+
+    # SynthID pixel-watermark proxy: a C2PA manifest from a SynthID-using
+    # vendor (Google/OpenAI) on AI-generated content implies an invisible
+    # SynthID watermark in the pixels (see SYNTHID_C2PA_ISSUERS).
+    synthid_vendors = synthid_vendors_in(buf)
+    if synthid_vendors and ai_source:
+        c2pa_info["synthid_vendors"] = synthid_vendors
+        c2pa_info["synthid_watermark"] = synthid_verdict(", ".join(synthid_vendors))
+
+    # Soft-binding: a forensic/third-party watermark vendor named in the
+    # manifest (Adobe TrustMark, Digimarc, ...), independent of the issuer.
+    soft_binding_vendors = soft_binding_vendors_in(buf)
+    if soft_binding_vendors:
+        c2pa_info["soft_binding_vendors"] = soft_binding_vendors
+        c2pa_info["soft_binding"] = ", ".join(soft_binding_vendors)
+
+    return ai_source
+
+
 def _parse_c2pa_chunk(chunk_data: bytes, c2pa_info: dict[str, Any]) -> None:
-    """Parse C2PA chunk data and populate info dictionary."""
+    """Parse a raw caBX chunk payload and populate the info dictionary.
+
+    The fallback path, used when the official c2pa-python reader is unavailable
+    or rejects the file (synthetic/partial blobs, broken installs).
+    """
     c2pa_info["c2pa_manifest"] = f"C2PA manifest ({len(chunk_data)} bytes)"
 
-    # Find issuers
-    issuers: list[str] = []
-    for sig, name in C2PA_ISSUERS.items():
-        if sig in chunk_data:
-            issuers.append(name)
-    if issuers:
-        c2pa_info["issuer"] = ", ".join(set(issuers))
-
-    # Find AI tools
-    ai_tools: list[str] = []
-    for sig, name in C2PA_AI_TOOLS.items():
-        if sig in chunk_data:
-            ai_tools.append(name)
-    if ai_tools:
-        c2pa_info["ai_tool"] = ", ".join(set(ai_tools))
+    _populate_registry_fields(chunk_data, c2pa_info)
 
     # Claim generator and spec version: read the CBOR text-string values
     # directly (regex byte-grabbing produced artifacts like ``fGPT-4o``).
@@ -229,46 +419,12 @@ def _parse_c2pa_chunk(chunk_data: bytes, c2pa_info: dict[str, Any]) -> None:
     if (spec := cbor_text_after(chunk_data, b"specVersion")) and spec.isprintable():
         c2pa_info["c2pa_spec"] = spec
 
-    # Find actions
-    actions: list[str] = []
-    for sig, name in C2PA_ACTIONS.items():
-        if sig in chunk_data:
-            actions.append(name)
-    if actions:
-        c2pa_info["actions"] = ", ".join(actions)
-
     # Find timestamps
     timestamp_matches = re.findall(rb"(\d{14}Z)", chunk_data)
     if timestamp_matches:
         c2pa_info["timestamp"] = timestamp_matches[0].decode("utf-8")
         if len(timestamp_matches) > 1:
             c2pa_info["timestamps"] = [t.decode("utf-8") for t in timestamp_matches[:3]]
-
-    # Find digital source type
-    ai_source = False
-    if b"trainedAlgorithmicMedia" in chunk_data:
-        c2pa_info["source_type"] = "trainedAlgorithmicMedia (AI-generated)"
-        ai_source = True
-    elif b"algorithmicMedia" in chunk_data:
-        c2pa_info["source_type"] = "algorithmicMedia"
-    elif b"compositeWithTrainedAlgorithmicMedia" in chunk_data:
-        c2pa_info["source_type"] = "compositeWithTrainedAlgorithmicMedia (AI-enhanced)"
-        ai_source = True
-
-    # SynthID pixel-watermark proxy: a C2PA manifest from a SynthID-using
-    # vendor (Google/OpenAI) on AI-generated content implies an invisible
-    # SynthID watermark in the pixels (see SYNTHID_C2PA_ISSUERS).
-    synthid_vendors = synthid_vendors_in(chunk_data)
-    if synthid_vendors and ai_source:
-        c2pa_info["synthid_vendors"] = synthid_vendors
-        c2pa_info["synthid_watermark"] = synthid_verdict(", ".join(synthid_vendors))
-
-    # Soft-binding: a forensic/third-party watermark vendor named in the
-    # manifest (Adobe TrustMark, Digimarc, ...), independent of the issuer.
-    soft_binding_vendors = soft_binding_vendors_in(chunk_data)
-    if soft_binding_vendors:
-        c2pa_info["soft_binding_vendors"] = soft_binding_vendors
-        c2pa_info["soft_binding"] = ", ".join(soft_binding_vendors)
 
 
 def extract_c2pa_chunk(image_path: Path) -> bytes | None:

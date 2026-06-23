@@ -42,9 +42,13 @@ from remove_ai_watermarks.metadata import (
 )
 from remove_ai_watermarks.noai.c2pa import cbor_text_after, extract_c2pa_info, soft_binding_vendors_in
 from remove_ai_watermarks.noai.constants import C2PA_AI_TOOLS, C2PA_AI_VENDORS, C2PA_ISSUERS
+from remove_ai_watermarks.watermark_registry import GEMINI_SPARKLE_TRUST_CONF
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Any
+
+    from numpy.typing import NDArray
 
     from remove_ai_watermarks.watermark_registry import MarkDetection
 
@@ -54,11 +58,14 @@ log = logging.getLogger(__name__)
 _SCAN_BYTES = 1024 * 1024
 
 # Visible-sparkle confidence above which the signal is trusted as provenance.
-# Stricter than the removal default (0.25): on the corpus, Gemini-family
-# sparkles score >= 0.56 while non-sparkle images top out at 0.49, so 0.5
-# cleanly separates them and avoids false positives when sparkle is the only
-# signal (e.g. an OpenAI image scored 0.37 -- below threshold, correctly dropped).
-_SPARKLE_THRESHOLD = 0.5
+# Shared with the removal arbitration (watermark_registry.GEMINI_SPARKLE_TRUST_CONF)
+# so the provenance "is there a sparkle" verdict and the removal "take the sparkle"
+# decision can never drift apart -- the detect-vs-remove desync the retained-corpus
+# mining surfaced (2026-06-20). On the corpus Gemini-family sparkles score >= 0.56
+# while non-sparkle images top out at 0.49, so 0.5 cleanly separates them and avoids
+# false positives when the sparkle is the only signal (e.g. an OpenAI image scored
+# 0.37 -- below threshold, correctly dropped).
+_SPARKLE_THRESHOLD = GEMINI_SPARKLE_TRUST_CONF
 
 # Issuer (C2PA signer) -> human-readable generating platform, derived from the
 # single C2PA_AI_VENDORS registry. Ordered: when a manifest names several issuers
@@ -129,6 +136,22 @@ class ProvenanceReport:
     is_ai_generated: bool | None  # True / False is never asserted; None = unknown
     platform: str | None
     confidence: str  # "high" | "medium" | "none"
+    # Coarse AI-origin kind from the C2PA digital-source-type, so a caller can
+    # branch on full generation vs an AI-touched real photo:
+    #   "generated" -- digitalSourceType trainedAlgorithmicMedia (fully AI).
+    #   "enhanced"  -- compositeWithTrainedAlgorithmicMedia (real content with an
+    #                  AI-composited region; scrub the AI region, keep the photo).
+    #   None        -- no C2PA AI source-type (verdict, if AI, came from another
+    #                  signal: IPTC, AIGC, local gen params, xAI, ...).
+    ai_source_kind: str | None = None
+    # True when the AI verdict rests on a metadata or embedded-invisible signal
+    # (C2PA AI issuer / SynthID proxy, IPTC, AIGC, local gen params, EXIF/xAI, or
+    # an open DWT-DCT / TrustMark decode) -- as opposed to a visible mark or a
+    # weak medium-confidence hint (hf-job, Samsung genAIType). It is exactly the
+    # set of signals an invisible/diffusion scrub targets: a visible-only or
+    # no-signal image has it False. Equivalent to ``confidence == "high"``;
+    # surfaced as a field so callers gate on intent, not on the string.
+    ai_from_metadata: bool = False
     watermarks: list[str] = field(default_factory=list[str])
     signals: list[Signal] = field(default_factory=list["Signal"])
     caveats: list[str] = field(default_factory=list[str])
@@ -358,19 +381,21 @@ def _integrity_clashes(
     return clashes
 
 
-def _visible_sparkle(image_path: Path) -> float | None:
+def _visible_sparkle(image_path: Path, *, image: NDArray[Any] | None = None) -> float | None:
     """Visible Gemini-sparkle confidence in [0, 1], or None if unavailable.
 
     Optional: needs cv2/numpy (no GPU). The cv2 work lives in gemini_engine so
     this module stays dependency-light; returns None if cv2 or the engine
-    assets are missing, or the image can't be read.
+    assets are missing, or the image can't be read. ``image`` is a pre-decoded
+    BGR array shared across the visible-mark detectors (see ``identify``) so the
+    file is not decoded once per detector.
     """
     try:
         from remove_ai_watermarks.gemini_engine import detect_sparkle_confidence
     except Exception as exc:  # cv2/engine assets missing
         log.debug("visible-sparkle detector unavailable: %s", exc)
         return None
-    return detect_sparkle_confidence(image_path)
+    return detect_sparkle_confidence(image_path, image=image)
 
 
 # Visible text marks (registry keys) -> human-readable platform, mirroring the
@@ -385,14 +410,16 @@ _VISIBLE_MARK_PLATFORM = {
 }
 
 
-def _visible_text_marks(image_path: Path) -> list[MarkDetection]:
+def _visible_text_marks(image_path: Path, *, image: NDArray[Any] | None = None) -> list[MarkDetection]:
     """Detected visible Doubao/Jimeng marks (registry ``MarkDetection`` list).
 
     The Gemini sparkle keeps its own ``_visible_sparkle`` path (file-level
     confidence); these two text marks reuse the registry detectors, which apply
     each engine's calibrated NCC threshold via ``MarkDetection.detected``.
     Optional: needs cv2/numpy; returns ``[]`` if the engines/assets are missing
-    or the image can't be read.
+    or the image can't be read. ``image`` is a pre-decoded BGR array shared
+    across the visible-mark detectors (see ``identify``) so the file is not
+    decoded once per detector.
     """
     try:
         from remove_ai_watermarks.image_io import imread
@@ -400,7 +427,8 @@ def _visible_text_marks(image_path: Path) -> list[MarkDetection]:
     except Exception as exc:  # cv2/engine assets missing
         log.debug("visible-mark detectors unavailable: %s", exc)
         return []
-    image = imread(image_path)
+    if image is None:
+        image = imread(image_path)
     if image is None:
         return []
     detections: list[MarkDetection] = []
@@ -477,9 +505,18 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
     # ── C2PA Content Credentials ────────────────────────────────────
     has_c2pa = bool(info) or c2pa_marker_in(head)
     issuers = [info["issuer"]] if info.get("issuer") else _issuers_in(head)
-    c2pa_is_ai = "trainedAlgorithmicMedia" in info.get("source_type", "") or any(
-        m in head for m in (b"trainedAlgorithmicMedia", b"compositeWithTrainedAlgorithmicMedia")
-    )
+    # Full AI generation (trainedAlgorithmicMedia) vs an AI-enhanced real photo
+    # (compositeWithTrainedAlgorithmicMedia). The structured kind is parsed once in
+    # noai.c2pa._populate_registry_fields (covers PNG + any container the c2pa-python
+    # reader handles); fall back to a raw head scan for the non-PNG raw-blob path
+    # where extract_c2pa_info returns {}. Full generation wins when both appear.
+    c2pa_source_kind = info.get("ai_source_kind")
+    if c2pa_source_kind is None:
+        if b"trainedAlgorithmicMedia" in head:
+            c2pa_source_kind = "generated"
+        elif b"compositeWithTrainedAlgorithmicMedia" in head:
+            c2pa_source_kind = "enhanced"
+    c2pa_is_ai = c2pa_source_kind is not None
     # Generator string (for the signal detail): structured for PNG, CBOR-scanned
     # for other containers. Best-effort -- some manifests key it as
     # `claim_generator_info` (Pixel), so this can be None even when a device is
@@ -670,17 +707,32 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         or xai_sig
     )
 
+    # Decode the file ONCE for every visible-mark detector. The sparkle and the
+    # text-mark detectors both consume a BGR array; letting each re-read the file
+    # was two full cv2 decodes of the same bitmap, which spikes memory on a small
+    # worker. None (cv2 missing / unreadable container) makes each detector fall
+    # back to its own read, preserving the old behavior.
+    vis_image: NDArray[Any] | None = None
+    if check_visible:
+        try:
+            from remove_ai_watermarks.image_io import imread
+
+            vis_image = imread(image_path)
+        except Exception as exc:  # cv2 missing - detectors fall back / no-op
+            log.debug("visible-mark decode unavailable: %s", exc)
+
     # ── Visible Gemini sparkle (fallback for stripped-metadata case) ─
-    if check_visible and (conf := _visible_sparkle(image_path)) is not None and conf >= _SPARKLE_THRESHOLD:
-        signals.append(Signal("visible_sparkle", f"NCC confidence {conf:.2f}", "medium"))
-        watermarks.append(f"Visible Gemini sparkle (confidence {conf:.2f})")
+    sparkle_conf = _visible_sparkle(image_path, image=vis_image) if check_visible else None
+    if sparkle_conf is not None and sparkle_conf >= _SPARKLE_THRESHOLD:
+        signals.append(Signal("visible_sparkle", f"NCC confidence {sparkle_conf:.2f}", "medium"))
+        watermarks.append(f"Visible Gemini sparkle (confidence {sparkle_conf:.2f})")
         if platform is None:
             platform = "Google Gemini family (visible sparkle detected)"
 
     # ── Visible Doubao / Jimeng text marks (registry; same stripped-metadata
     #    fallback role as the Gemini sparkle above) ─
     if check_visible:
-        for det in _visible_text_marks(image_path):
+        for det in _visible_text_marks(image_path, image=vis_image):
             signals.append(Signal(f"visible_{det.key}", f"NCC confidence {det.confidence:.2f}", "medium"))
             watermarks.append(f"Visible {det.label} (confidence {det.confidence:.2f})")
             if platform is None:
@@ -712,8 +764,40 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         is_ai_generated=is_ai,
         platform=platform,
         confidence=confidence,
+        # Only meaningful when the AI verdict actually came from the C2PA source
+        # type; a non-C2PA AI signal (IPTC/AIGC/local gen) leaves it None.
+        ai_source_kind=c2pa_source_kind if (is_ai and has_c2pa) else None,
+        ai_from_metadata=ai_from_metadata,
         watermarks=watermarks,
         signals=signals,
         caveats=caveats,
         integrity_clashes=clashes,
     )
+
+
+def has_invisible_target(image_path: Path) -> bool:
+    """True when a locally-detectable invisible/metadata AI signal is present.
+
+    The decision gate for the diffusion scrub (``invisible`` / ``all`` / ``batch``):
+    regenerating pixels removes an invisible watermark (SynthID, open DWT-DCT,
+    TrustMark) but degrades a real photo, so it must not run when there is nothing
+    to remove. Runs :func:`identify` with ``check_visible=False`` -- a visible mark
+    is handled by the separate visible pass and is NOT a diffusion target -- and
+    ``check_invisible=True`` so an open watermark counts. Returns
+    ``report.ai_from_metadata`` (C2PA AI issuer / SynthID proxy, IPTC, AIGC, local
+    gen params, EXIF/xAI, open DWT-DCT / TrustMark).
+
+    IMPORTANT -- this cannot prove a pixel SynthID is absent: SynthID is detectable
+    only through its C2PA proxy, so a metadata-stripped AI image reads as no signal
+    here. A False therefore means "no locally-detectable invisible target", not
+    "clean". Callers must NOT present a skip as a finished clean result.
+
+    Fail-safe: any error resolves to True so the removal still runs -- leaving a
+    watermark on a paid removal is worse than over-regenerating a clean image.
+    """
+    try:
+        report = identify(image_path, check_visible=False, check_invisible=True)
+    except Exception:  # unreadable / detector error -> do not skip the removal
+        log.debug("has_invisible_target: identify failed, defaulting to run", exc_info=True)
+        return True
+    return report.ai_from_metadata

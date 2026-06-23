@@ -22,8 +22,10 @@ from remove_ai_watermarks.identify import (
     _integrity_clashes,
     _issuers_in,
     _vendor_of,
+    has_invisible_target,
     identify,
 )
+from remove_ai_watermarks.watermark_registry import GEMINI_SPARKLE_TRUST_CONF
 
 # Where the lazy import inside identify._visible_sparkle resolves the detector.
 _SPARKLE_TARGET = "remove_ai_watermarks.gemini_engine.detect_sparkle_confidence"
@@ -65,6 +67,19 @@ class TestAttributePlatform:
         platform = _attribute_platform(["Stability AI"])
         assert platform
         assert "Stability AI" in platform
+
+    def test_canva(self):
+        platform = _attribute_platform(["Canva"])
+        assert platform
+        assert "Canva" in platform
+
+    def test_byteplus_attributes_to_bytedance(self):
+        # ByteDance's intl brand signs as "Byteplus Pte. Ltd."; the registry maps
+        # it to the ByteDance platform (was mis-read as Adobe via an incidental
+        # "Adobe XMP" file string before the entry existed).
+        platform = _attribute_platform(["BytePlus (ByteDance)"])
+        assert platform
+        assert "ByteDance" in platform
 
     def test_empty_is_none(self):
         assert _attribute_platform([]) is None
@@ -127,6 +142,23 @@ class TestIdentifyNonPng:
         assert r.is_ai_generated is True
         assert "ByteDance" in (r.platform or "")
 
+    def test_bytedance_chinese_legal_name_attributed(self, tmp_path: Path):
+        # Some Volcano Engine certs name the signer with the Chinese legal entity
+        # rather than the latin "volcengine"; the latin needle misses it, so the
+        # Chinese-name registry entry is what attributes real ByteDance output.
+        blob = "北京火山引擎科技有限公司".encode() + b" ... trainedAlgorithmicMedia"
+        path = self._c2pa_jpeg(tmp_path, blob)
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.is_ai_generated is True
+        assert "ByteDance" in (r.platform or "")
+
+    def test_elevenlabs_attributed(self, tmp_path: Path):
+        path = self._c2pa_jpeg(tmp_path, b"Eleven Labs Inc. ... trainedAlgorithmicMedia")
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.is_ai_generated is True
+        assert r.platform == "ElevenLabs"
+        assert not any("SynthID" in w for w in r.watermarks)  # ElevenLabs does not use SynthID
+
     def test_stability_ai_issuer_attributed_no_synthid(self, tmp_path: Path):
         path = self._c2pa_jpeg(tmp_path, b"Stability AI ... trainedAlgorithmicMedia")
         r = identify(path, check_visible=False)
@@ -134,6 +166,21 @@ class TestIdentifyNonPng:
         assert r.platform is not None
         assert "Stability AI" in r.platform
         assert not any("SynthID" in w for w in r.watermarks)  # Stability does not use SynthID
+
+    def test_trained_source_is_generated_kind(self, tmp_path: Path):
+        path = self._c2pa_jpeg(tmp_path, b"OpenAI ... trainedAlgorithmicMedia")
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.is_ai_generated is True
+        assert r.ai_source_kind == "generated"
+
+    def test_composite_source_is_enhanced_kind(self, tmp_path: Path):
+        # compositeWithTrainedAlgorithmicMedia: a real photo with an AI-composited
+        # region. Still AI (is_ai True), but the kind must read "enhanced" so a
+        # caller can do region-targeted cleaning instead of a full-frame regen.
+        path = self._c2pa_jpeg(tmp_path, b"Adobe ... compositeWithTrainedAlgorithmicMedia")
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.is_ai_generated is True
+        assert r.ai_source_kind == "enhanced"
 
     def test_c2pa_without_ai_marker_is_unknown(self, tmp_path: Path):
         # Adobe signs C2PA on plain Photoshop edits too. Without an AI digital-
@@ -189,6 +236,16 @@ class TestIdentifySamsungGalaxy:
         assert r.platform == "ASUS Gallery (C2PA signer)"
         assert any("C2PA" in w for w in r.watermarks)
 
+    def test_galaxy_capture_without_ai_marker_is_not_ai(self, tmp_path: Path):
+        # A genuine Galaxy phone capture carries Samsung Galaxy C2PA provenance but
+        # NO AI source-type / genAIType. It must stay is_ai=None -- the device cert
+        # is authenticity provenance of a real photo, not an AI-generation signal.
+        path = self._jpeg(tmp_path, "s25_capture.jpg", b"Samsung Galaxy Galaxy S25 c2pa-rs no ai marker")
+        r = identify(path, check_visible=False, check_invisible=False)
+        assert r.is_ai_generated is None
+        assert r.platform == "Samsung Galaxy (C2PA)"
+        assert any("C2PA" in w for w in r.watermarks)
+
 
 # ── End-to-end verdicts on real fixtures ────────────────────────────
 
@@ -216,6 +273,19 @@ class TestIdentifyRealSamples:
         assert r.is_ai_generated is True
         assert any("IPTC" in w for w in r.watermarks)
 
+    def test_flux_bfl_c2pa_png(self):
+        # flux-1.png: real Black Forest Labs FLUX.2 Playground output (signed C2PA).
+        r = identify(SAMPLES_DIR / "flux-1.png", check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.platform == "Black Forest Labs (FLUX)"
+
+    def test_flux_bfl_c2pa_jpeg_via_reader(self):
+        # flux-1.jpg: same source as a JPEG -- the real committed JPEG-with-C2PA
+        # fixture that exercises the c2pa-python non-PNG reader path end to end.
+        r = identify(SAMPLES_DIR / "flux-1.jpg", check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.platform == "Black Forest Labs (FLUX)"
+
     def test_clean_photo_is_unknown_not_clean(self, clean_photo: Path):
         r = identify(clean_photo, check_visible=False)
         assert r.is_ai_generated is None  # never asserted False
@@ -223,12 +293,49 @@ class TestIdentifyRealSamples:
         assert r.confidence == "none"
         assert r.watermarks == []
 
+    def test_has_invisible_target_true_on_metadata_ai(self):
+        # The scrub gate: a C2PA/SynthID image and an IPTC "Made with AI" image are
+        # both invisible/metadata targets, so the diffusion scrub should run.
+        assert has_invisible_target(SAMPLES_DIR / "chatgpt-1.png") is True
+        assert has_invisible_target(SAMPLES_DIR / "mj-1.png") is True
+        # ai_from_metadata mirrors confidence == "high" and backs the helper.
+        assert identify(SAMPLES_DIR / "chatgpt-1.png", check_visible=False).ai_from_metadata is True
+
+    def test_has_invisible_target_false_on_clean_photo(self, clean_photo: Path):
+        # No detectable invisible signal -> skip the scrub (do not degrade a clean image).
+        assert has_invisible_target(clean_photo) is False
+        assert identify(clean_photo, check_visible=False).ai_from_metadata is False
+
     def test_strip_caveat_always_present(self, clean_photo: Path):
         r = identify(clean_photo, check_visible=False)
         assert any("not proof" in c for c in r.caveats)
 
     def test_returns_report_dataclass(self):
         assert isinstance(identify(SAMPLES_DIR / "firefly-1.png", check_visible=False), ProvenanceReport)
+
+
+class TestHasInvisibleTargetFailSafe:
+    """The scrub gate fails SAFE: when a detector errors, it runs the removal."""
+
+    def test_detector_error_defaults_to_run(self, tmp_path: Path):
+        # If identify raises (a detector crash), the gate must return True so the
+        # caller still attempts removal -- leaving a watermark on a paid removal is
+        # worse than over-regenerating. (Garbage bytes do NOT raise; identify returns
+        # a clean None verdict there, so that path correctly skips -- see below.)
+        bad = tmp_path / "x.png"
+        bad.write_bytes(b"not image bytes")
+        with patch("remove_ai_watermarks.identify.identify", side_effect=RuntimeError("boom")):
+            assert has_invisible_target(bad) is True
+
+    def test_unreadable_bytes_are_not_a_target(self, tmp_path: Path):
+        # No raise, no signal -> not a scrub target (the CLI rejects undecodable
+        # images earlier anyway; this only documents the gate's own verdict).
+        bad = tmp_path / "x.png"
+        bad.write_bytes(b"not image bytes")
+        assert has_invisible_target(bad) is False
+
+    def test_local_ai_params_are_a_target(self, tmp_png_with_ai_metadata: Path):
+        assert has_invisible_target(tmp_png_with_ai_metadata) is True
 
 
 # ── Local diffusion parameters (Stable Diffusion / ComfyUI) ─────────
@@ -250,6 +357,12 @@ class TestIdentifyLocalParams:
         signal = next(s for s in r.signals if s.name == "gen_params")
         assert "parameters" in signal.detail
         assert signal.confidence == "high"
+
+    def test_local_gen_params_have_no_c2pa_source_kind(self, tmp_png_with_ai_metadata: Path):
+        # AI verdict from local SD params (not C2PA) -> ai_source_kind stays None.
+        r = identify(tmp_png_with_ai_metadata, check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.ai_source_kind is None
 
     def test_clean_png_is_unknown(self, tmp_clean_png: Path):
         r = identify(tmp_clean_png, check_visible=False)
@@ -373,6 +486,66 @@ class TestIdentifyVisibleSparkle:
         assert r.confidence == "high"
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEMO_BEFORE = REPO_ROOT / "demo_banana_before.png"
+_DEMO_AFTER = REPO_ROOT / "demo_banana_after.png"
+
+
+@pytest.mark.skipif(not (_DEMO_BEFORE.exists() and _DEMO_AFTER.exists()), reason="demo banana pair not present")
+class TestSparkleDetectRemoveAlignment:
+    """Detect (identify) and remove (registry.best_auto_mark) must agree on the
+    same image -- the retained-corpus desync where identify reported a sparkle the
+    removal arbitration declined (or vice versa). Both gate on the single shared
+    GEMINI_SPARKLE_TRUST_CONF, so a sparkle just over the line is taken by BOTH
+    and one just under is declined by BOTH. Fixtures composite the real captured
+    sparkle (before-minus-after) back at reduced opacity to land on either side.
+    """
+
+    @staticmethod
+    def _faint_sparkle(tmp_path: Path, opacity: float) -> Path:
+        import numpy as np
+
+        from remove_ai_watermarks import image_io
+
+        before = image_io.imread(_DEMO_BEFORE).astype("float32")
+        after = image_io.imread(_DEMO_AFTER).astype("float32")
+        faint = np.clip(after + opacity * (before - after), 0, 255).astype("uint8")
+        out = tmp_path / f"sparkle_{int(opacity * 100)}.png"
+        image_io.imwrite(out, faint)
+        return out
+
+    def _detect_remove(self, path: Path) -> tuple[bool, bool, float]:
+        from remove_ai_watermarks import image_io, watermark_registry
+        from remove_ai_watermarks.gemini_engine import detect_sparkle_confidence
+
+        conf = detect_sparkle_confidence(path) or 0.0
+        identify_fires = conf >= GEMINI_SPARKLE_TRUST_CONF
+        best = watermark_registry.best_auto_mark(image_io.imread(path))
+        remove_takes_gemini = best is not None and best.key == "gemini"
+        return identify_fires, remove_takes_gemini, conf
+
+    def test_above_threshold_both_fire(self, tmp_path: Path):
+        path = self._faint_sparkle(tmp_path, 0.7)  # ~0.55 conf, just over the line
+        identify_fires, remove_takes, conf = self._detect_remove(path)
+        assert conf >= GEMINI_SPARKLE_TRUST_CONF
+        assert identify_fires, f"identify declined a sparkle above threshold (conf={conf:.3f})"
+        assert remove_takes, f"removal declined a sparkle above threshold (conf={conf:.3f})"
+
+    def test_below_threshold_both_decline(self, tmp_path: Path):
+        path = self._faint_sparkle(tmp_path, 0.5)  # ~0.37 conf, just under the line
+        identify_fires, remove_takes, conf = self._detect_remove(path)
+        assert conf < GEMINI_SPARKLE_TRUST_CONF
+        assert not identify_fires, f"identify fired below threshold (conf={conf:.3f})"
+        assert not remove_takes, f"removal fired below threshold (conf={conf:.3f})"
+
+    def test_full_strength_both_fire(self):
+        # The shipped demo sparkle at full strength: unambiguous agreement.
+        identify_fires, remove_takes, conf = self._detect_remove(_DEMO_BEFORE)
+        assert conf >= GEMINI_SPARKLE_TRUST_CONF
+        assert identify_fires
+        assert remove_takes
+
+
 class TestIdentifyImportIsLight:
     """`import identify` must stay torch-free (lazy noai/__init__): the package
     is deployed on a 512 MB host where eagerly pulling torch/diffusers OOMs."""
@@ -433,6 +606,18 @@ class TestIdentifyVisibleTextMarks:
         with patch(_SPARKLE_TARGET, return_value=None), patch(_TEXT_MARKS_TARGET, return_value=[det]):
             r = identify(tmp_png_with_ai_metadata, check_visible=True)
         assert r.confidence == "high"
+
+    def test_visible_path_decodes_file_once(self, tmp_clean_png: Path):
+        """The web path identify(check_visible=True, check_invisible=False) must
+        decode the image exactly once and share the array across the sparkle +
+        text-mark detectors. Two decodes of the same bitmap spiked memory on the
+        small web worker (the OOM the decode-once refactor addresses)."""
+        import remove_ai_watermarks.image_io as image_io
+
+        real_imread = image_io.imread
+        with patch.object(image_io, "imread", side_effect=real_imread) as mock_imread:
+            identify(tmp_clean_png, check_visible=True, check_invisible=False)
+        assert mock_imread.call_count == 1
 
 
 # ── Caveats and serialization ───────────────────────────────────────
